@@ -16,10 +16,14 @@
 #define POST_INTERVAL_MS 1000
 #define LED_PIN          2
 
+// ── Server (hardcoded) ────────────────────────────────────────────────────────
+#define SERVER_URL "https://gps-tracker-xw5w.onrender.com/api/v1/tracker/location"
+
 // ── WiFi Manager config ───────────────────────────────────────────────────────
 #define AP_SSID               "GPS-Tracker-Setup"
-#define AP_PASS               ""              // open AP — no password
-#define WIFI_CONNECT_TIMEOUT  15000           // ms before falling back to AP mode
+#define AP_PASS               ""
+#define WIFI_CONNECT_TIMEOUT  15000
+#define MAX_DEVICES           3
 
 // ── App state ─────────────────────────────────────────────────────────────────
 enum AppState { SETUP_MODE, TRACKING_MODE };
@@ -36,7 +40,10 @@ unsigned long lastPostMs = 0;
 bool gpsReady = false;
 
 // Credentials loaded from NVS
-String savedSSID, savedPass, savedServerUrl, savedApiKey;
+String savedSSID, savedPass;
+String devName[MAX_DEVICES];
+String devKey[MAX_DEVICES];
+int    activeDevice = 0;  // index 0–2
 
 // ── UBX GPS config commands ───────────────────────────────────────────────────
 static const uint8_t UBX_SET_BAUD_115200[] = {
@@ -59,20 +66,26 @@ static void sendUBX(HardwareSerial &s, const uint8_t *cmd, size_t len) {
 // ── NVS helpers ───────────────────────────────────────────────────────────────
 void loadPrefs() {
   prefs.begin("gps-tracker", true);
-  savedSSID      = prefs.getString("ssid",       "");
-  savedPass      = prefs.getString("pass",       "");
-  savedServerUrl = prefs.getString("server_url", "");
-  savedApiKey    = prefs.getString("api_key",    "");
+  savedSSID    = prefs.getString("ssid", "");
+  savedPass    = prefs.getString("pass", "");
+  activeDevice = prefs.getInt("active_dev", 0);
+  for (int i = 0; i < MAX_DEVICES; i++) {
+    devName[i] = prefs.getString(("dev" + String(i) + "_name").c_str(), "");
+    devKey[i]  = prefs.getString(("dev" + String(i) + "_key").c_str(),  "");
+  }
   prefs.end();
 }
 
-void savePrefs(const String &ssid, const String &pass,
-               const String &serverUrl, const String &apiKey) {
+void savePrefs(const String &ssid, const String &pass, int activeDev,
+               String names[], String keys[]) {
   prefs.begin("gps-tracker", false);
-  prefs.putString("ssid",       ssid);
-  prefs.putString("pass",       pass);
-  prefs.putString("server_url", serverUrl);
-  prefs.putString("api_key",    apiKey);
+  prefs.putString("ssid", ssid);
+  prefs.putString("pass", pass);
+  prefs.putInt("active_dev", activeDev);
+  for (int i = 0; i < MAX_DEVICES; i++) {
+    prefs.putString(("dev" + String(i) + "_name").c_str(), names[i]);
+    prefs.putString(("dev" + String(i) + "_key").c_str(),  keys[i]);
+  }
   prefs.end();
 }
 
@@ -82,14 +95,14 @@ void clearPrefs() {
   prefs.end();
 }
 
-// ── Web page (served from flash) ──────────────────────────────────────────────
+// ── Web page ──────────────────────────────────────────────────────────────────
 const char HTML_PAGE[] PROGMEM = R"rawhtml(
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>GPS Tracker — Wi-Fi Setup</title>
+<title>TraceX — Setup</title>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -104,7 +117,6 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
     padding: 24px 16px 48px;
   }
 
-  /* Background orbs */
   body::before, body::after {
     content: '';
     position: fixed;
@@ -125,7 +137,6 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
 
   .wrap { width: 100%; max-width: 480px; position: relative; z-index: 1; }
 
-  /* Header */
   .header { text-align: center; margin-bottom: 32px; }
   .header .icon {
     display: inline-flex; align-items: center; justify-content: center;
@@ -137,7 +148,17 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
   .header h1 { font-size: 24px; font-weight: 700; color: #fff; }
   .header p  { font-size: 14px; color: #94A3B8; margin-top: 4px; }
 
-  /* Card */
+  .server-badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: rgba(34,197,94,.1); border: 1px solid rgba(34,197,94,.25);
+    color: #4ADE80; font-size: 11px; font-family: monospace;
+    padding: 5px 12px; border-radius: 50px; margin-top: 10px;
+  }
+  .server-badge .dot-green {
+    width: 7px; height: 7px; border-radius: 50%; background: #22C55E;
+    box-shadow: 0 0 6px rgba(34,197,94,.5);
+  }
+
   .card {
     background: rgba(13,23,48,.85);
     border: 1px solid rgba(255,255,255,.1);
@@ -152,7 +173,6 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
     display: flex; align-items: center; gap: 8px;
   }
 
-  /* Scan button */
   .btn-scan {
     display: flex; align-items: center; justify-content: center; gap: 8px;
     width: 100%; padding: 11px; border-radius: 12px; border: none; cursor: pointer;
@@ -164,7 +184,6 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
   .btn-scan.spinning .scan-icon { animation: spin 1s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
 
-  /* Network list */
   .net-list { margin-top: 14px; display: flex; flex-direction: column; gap: 8px; }
   .net-item {
     display: flex; align-items: center; gap: 12px;
@@ -176,10 +195,7 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
   .net-item.active { background: rgba(59,130,246,.18); border-color: #3B82F6; }
 
   .bars { display: flex; align-items: flex-end; gap: 2px; height: 18px; }
-  .bars span {
-    width: 4px; border-radius: 2px; background: #1E40AF;
-    transition: background .15s;
-  }
+  .bars span { width: 4px; border-radius: 2px; background: #1E40AF; transition: background .15s; }
   .bars span.lit  { background: #3B82F6; }
   .net-item.active .bars span.lit { background: #60A5FA; }
 
@@ -187,7 +203,6 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
   .net-rssi { font-size: 11px; color: #64748B; }
   .lock { font-size: 13px; color: #475569; }
 
-  /* Form */
   .field { margin-bottom: 14px; }
   label { display: block; font-size: 12px; font-weight: 600; color: #94A3B8; margin-bottom: 6px; }
   .input-wrap { position: relative; }
@@ -204,7 +219,43 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
   }
   .eye:hover { color: #94A3B8; }
 
-  /* Connect button */
+  /* Device slots */
+  .device-slot {
+    border: 1px solid rgba(255,255,255,.08);
+    border-radius: 14px;
+    padding: 16px;
+    margin-bottom: 12px;
+    background: rgba(255,255,255,.02);
+    transition: border-color .2s, background .2s;
+  }
+  .device-slot.active-slot {
+    border-color: #3B82F6;
+    background: rgba(59,130,246,.06);
+  }
+  .slot-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  .slot-label {
+    font-size: 12px; font-weight: 700; color: #60A5FA; text-transform: uppercase; letter-spacing: .05em;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .active-badge {
+    display: none; background: rgba(34,197,94,.15); border: 1px solid rgba(34,197,94,.3);
+    color: #4ADE80; font-size: 10px; font-weight: 700; padding: 2px 8px;
+    border-radius: 50px; letter-spacing: .04em;
+  }
+  .device-slot.active-slot .active-badge { display: inline-block; }
+  .btn-activate {
+    padding: 5px 12px; border-radius: 8px; border: 1px solid rgba(59,130,246,.4);
+    background: rgba(59,130,246,.12); color: #60A5FA; font-size: 11px; font-weight: 600;
+    cursor: pointer; transition: all .2s;
+  }
+  .btn-activate:hover { background: rgba(59,130,246,.25); }
+  .device-slot.active-slot .btn-activate { display: none; }
+
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
   .btn-connect {
     width: 100%; padding: 14px; border-radius: 14px; border: none; cursor: pointer;
     background: linear-gradient(135deg,#1D4ED8,#3B82F6);
@@ -216,20 +267,16 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
   .btn-connect:active { transform: translateY(0); }
   .btn-connect:disabled { opacity: .5; cursor: not-allowed; transform: none; }
 
-  /* Status */
   .status-row {
     display: flex; align-items: center; gap: 10px;
     padding: 12px 14px; border-radius: 12px;
     background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.07);
     margin-bottom: 10px; font-size: 13px;
   }
-  .dot {
-    width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0;
-    background: #475569;
-  }
-  .dot.green  { background: #22C55E; box-shadow: 0 0 8px rgba(34,197,94,.5); }
-  .dot.blue   { background: #3B82F6; animation: pulse 1.4s ease-in-out infinite; }
-  .dot.red    { background: #EF4444; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; background: #475569; }
+  .dot.green { background: #22C55E; box-shadow: 0 0 8px rgba(34,197,94,.5); }
+  .dot.blue  { background: #3B82F6; animation: pulse 1.4s ease-in-out infinite; }
+  .dot.red   { background: #EF4444; }
   @keyframes pulse {
     0%,100% { box-shadow: 0 0 0 0 rgba(59,130,246,.5); }
     50%      { box-shadow: 0 0 0 5px rgba(59,130,246,0); }
@@ -237,7 +284,6 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
   .status-text { flex: 1; color: #CBD5E1; }
   .status-ip   { font-size: 12px; color: #60A5FA; font-family: monospace; }
 
-  /* Toast */
   #toast {
     position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(80px);
     background: rgba(13,23,48,.95); border: 1px solid rgba(255,255,255,.12);
@@ -250,9 +296,7 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
   #toast.ok   { border-color: rgba(34,197,94,.4); }
   #toast.err  { border-color: rgba(239,68,68,.4); }
 
-  .divider {
-    height: 1px; background: rgba(255,255,255,.07); margin: 20px 0;
-  }
+  .divider { height: 1px; background: rgba(255,255,255,.07); margin: 20px 0; }
   .reset-link {
     text-align: center; font-size: 12px; color: #475569; cursor: pointer;
     text-decoration: underline; text-underline-offset: 3px;
@@ -263,14 +307,17 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
 <body>
 <div class="wrap">
 
-  <!-- Header -->
   <div class="header">
     <div class="icon">📍</div>
-    <h1>GPS Tracker</h1>
-    <p>Wi-Fi &amp; Server Configuration</p>
+    <h1>TraceX</h1>
+    <p>Wi-Fi &amp; Device Configuration</p>
+    <div class="server-badge">
+      <div class="dot-green"></div>
+      gps-tracker-xw5w.onrender.com
+    </div>
   </div>
 
-  <!-- Status Card -->
+  <!-- Status -->
   <div class="card">
     <div class="card-title">⚡ Current Status</div>
     <div id="statusRow" class="status-row">
@@ -280,21 +327,18 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
     </div>
   </div>
 
-  <!-- Wi-Fi Card -->
+  <!-- Wi-Fi -->
   <div class="card">
     <div class="card-title">📶 Wi-Fi Networks</div>
-
     <button class="btn-scan" id="scanBtn" onclick="scanNetworks()">
       <span class="scan-icon">⟳</span> Scan for Networks
     </button>
-
     <div class="net-list" id="netList"></div>
   </div>
 
-  <!-- Credentials Card -->
+  <!-- Credentials -->
   <div class="card">
-    <div class="card-title">🔐 Credentials</div>
-
+    <div class="card-title">🔐 Wi-Fi Credentials</div>
     <div class="field">
       <label>Wi-Fi Network (SSID)</label>
       <input type="text" id="ssid" placeholder="Select from scan or type manually">
@@ -303,21 +347,66 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
       <label>Wi-Fi Password</label>
       <div class="input-wrap">
         <input type="password" id="pass" placeholder="Password">
-        <span class="eye" onclick="togglePass()">👁</span>
+        <span class="eye" onclick="toggleField('pass')">👁</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Devices -->
+  <div class="card">
+    <div class="card-title">🛰 Devices <span style="color:#475569;font-size:11px;font-weight:500;text-transform:none;letter-spacing:0">(tap Activate to select)</span></div>
+
+    <div id="slot0" class="device-slot">
+      <div class="slot-header">
+        <div class="slot-label">Device 1 <span class="active-badge">ACTIVE</span></div>
+        <button class="btn-activate" onclick="setActive(0)">Activate</button>
+      </div>
+      <div class="field" style="margin-bottom:10px">
+        <label>Device Name</label>
+        <input type="text" id="dev0name" placeholder="e.g. Tracker-01">
+      </div>
+      <div class="field" style="margin-bottom:0">
+        <label>API Key</label>
+        <div class="input-wrap">
+          <input type="password" id="dev0key" placeholder="64-character key from TraceX app">
+          <span class="eye" onclick="toggleField('dev0key')">👁</span>
+        </div>
       </div>
     </div>
 
-    <div class="divider"></div>
-
-    <div class="field">
-      <label>Server URL</label>
-      <input type="text" id="serverUrl" placeholder="http://192.168.1.x:4000/api/v1/tracker/location">
+    <div id="slot1" class="device-slot">
+      <div class="slot-header">
+        <div class="slot-label">Device 2 <span class="active-badge">ACTIVE</span></div>
+        <button class="btn-activate" onclick="setActive(1)">Activate</button>
+      </div>
+      <div class="field" style="margin-bottom:10px">
+        <label>Device Name</label>
+        <input type="text" id="dev1name" placeholder="e.g. Tracker-02">
+      </div>
+      <div class="field" style="margin-bottom:0">
+        <label>API Key</label>
+        <div class="input-wrap">
+          <input type="password" id="dev1key" placeholder="64-character key from TraceX app">
+          <span class="eye" onclick="toggleField('dev1key')">👁</span>
+        </div>
+      </div>
     </div>
-    <div class="field">
-      <label>Device API Key</label>
-      <div class="input-wrap">
-        <input type="password" id="apiKey" placeholder="64-character key from dashboard">
-        <span class="eye" onclick="toggleKey()">👁</span>
+
+    <div id="slot2" class="device-slot">
+      <div class="slot-header">
+        <div class="slot-label">Device 3 <span class="active-badge">ACTIVE</span></div>
+        <button class="btn-activate" onclick="setActive(2)">Activate</button>
+      </div>
+      <div class="field" style="margin-bottom:10px">
+        <label>Device Name</label>
+        <input type="text" id="dev2name" placeholder="e.g. Tracker-03">
+      </div>
+      <div class="field" style="margin-bottom:0">
+        <label>API Key</label>
+        <div class="input-wrap">
+          <input type="password" id="dev2key" placeholder="64-character key from TraceX app">
+          <span class="eye" onclick="toggleField('dev2key')">👁</span>
+        </div>
       </div>
     </div>
 
@@ -332,33 +421,39 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
 <div id="toast"></div>
 
 <script>
-  let selectedSSID = '';
+  let selectedSSID  = '';
+  let activeSlot    = 0;
 
-  // ── Status polling ──────────────────────────────────────────────────────────
+  function setActive(idx) {
+    activeSlot = idx;
+    for (let i = 0; i < 3; i++) {
+      document.getElementById('slot' + i).classList.toggle('active-slot', i === idx);
+    }
+  }
+
   async function pollStatus() {
     try {
       const r = await fetch('/status');
       const d = await r.json();
-      const dot  = document.getElementById('dot');
-      const txt  = document.getElementById('statusText');
-      const ip   = document.getElementById('statusIp');
+      const dot = document.getElementById('dot');
+      const txt = document.getElementById('statusText');
+      const ip  = document.getElementById('statusIp');
       if (d.connected) {
-        dot.className  = 'dot green';
+        dot.className   = 'dot green';
         txt.textContent = 'Connected to ' + d.ssid;
         ip.textContent  = d.ip;
       } else {
-        dot.className  = 'dot red';
+        dot.className   = 'dot red';
         txt.textContent = 'Not connected';
         ip.textContent  = '';
       }
     } catch (_) {
-      document.getElementById('dot').className  = 'dot red';
+      document.getElementById('dot').className        = 'dot red';
       document.getElementById('statusText').textContent = 'Setup mode (AP)';
       document.getElementById('statusIp').textContent  = '192.168.4.1';
     }
   }
 
-  // ── Network scan ────────────────────────────────────────────────────────────
   async function scanNetworks() {
     const btn  = document.getElementById('scanBtn');
     const list = document.getElementById('netList');
@@ -366,7 +461,7 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
     btn.disabled = true;
     list.innerHTML = '<div style="text-align:center;color:#64748B;padding:12px;font-size:13px">Scanning…</div>';
     try {
-      const r = await fetch('/scan');
+      const r    = await fetch('/scan');
       const nets = await r.json();
       list.innerHTML = '';
       if (!nets.length) {
@@ -408,16 +503,26 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
     document.getElementById('pass').focus();
   }
 
-  // ── Save & Connect ──────────────────────────────────────────────────────────
   async function saveAndConnect() {
-    const ssid      = document.getElementById('ssid').value.trim();
-    const pass      = document.getElementById('pass').value;
-    const serverUrl = document.getElementById('serverUrl').value.trim();
-    const apiKey    = document.getElementById('apiKey').value.trim();
+    const ssid = document.getElementById('ssid').value.trim();
+    const pass = document.getElementById('pass').value;
 
-    if (!ssid)      { toast('Enter a Wi-Fi network name', 'err'); return; }
-    if (!serverUrl) { toast('Enter the server URL',        'err'); return; }
-    if (!apiKey)    { toast('Enter the device API key',    'err'); return; }
+    if (!ssid) { toast('Enter a Wi-Fi network name', 'err'); return; }
+
+    // Collect all 3 device slots
+    const devices = [];
+    for (let i = 0; i < 3; i++) {
+      devices.push({
+        name: document.getElementById('dev' + i + 'name').value.trim(),
+        key:  document.getElementById('dev' + i + 'key').value.trim()
+      });
+    }
+
+    // Active slot must have a key
+    if (!devices[activeSlot].key) {
+      toast('Active device (Device ' + (activeSlot+1) + ') needs an API key', 'err');
+      return;
+    }
 
     const btn = document.getElementById('connectBtn');
     btn.disabled    = true;
@@ -427,13 +532,12 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
       const r = await fetch('/save', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ssid, pass, server_url: serverUrl, api_key: apiKey })
+        body: JSON.stringify({ ssid, pass, active_dev: activeSlot, devices })
       });
       if (r.ok) {
         toast('Saved! Connecting to ' + ssid + '…', 'ok');
-        document.getElementById('dot').className  = 'dot blue';
+        document.getElementById('dot').className        = 'dot blue';
         document.getElementById('statusText').textContent = 'Connecting to ' + ssid + '…';
-        // Poll until connected
         setTimeout(pollStatus, 3000);
         setTimeout(pollStatus, 7000);
         setTimeout(pollStatus, 12000);
@@ -448,7 +552,6 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
     }
   }
 
-  // ── Reset ───────────────────────────────────────────────────────────────────
   async function resetDevice() {
     if (!confirm('Clear all saved credentials? The device will restart in setup mode.')) return;
     await fetch('/reset', { method: 'POST' }).catch(() => {});
@@ -456,18 +559,15 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
     setTimeout(() => location.reload(), 3000);
   }
 
-  // ── Helpers ──────────────────────────────────────────────────────────────────
-  function togglePass() {
-    const f = document.getElementById('pass');
+  function toggleField(id) {
+    const f = document.getElementById(id);
     f.type = f.type === 'password' ? 'text' : 'password';
   }
-  function toggleKey() {
-    const f = document.getElementById('apiKey');
-    f.type = f.type === 'password' ? 'text' : 'password';
-  }
+
   function esc(s) {
     return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   }
+
   let toastTimer;
   function toast(msg, type) {
     const el = document.getElementById('toast');
@@ -477,19 +577,20 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
     toastTimer = setTimeout(() => el.className = '', 3500);
   }
 
-  // ── Boot ──────────────────────────────────────────────────────────────────
   (async () => {
     await pollStatus();
-    // Pre-fill saved values
     try {
       const r = await fetch('/config');
       const d = await r.json();
-      if (d.ssid)       document.getElementById('ssid').value      = d.ssid;
-      if (d.server_url) document.getElementById('serverUrl').value = d.server_url;
-      if (d.api_key)    document.getElementById('apiKey').value    = d.api_key;
-      if (d.ssid)       selectedSSID = d.ssid;
-    } catch(_) {}
-    // Auto-scan on load
+      if (d.ssid) { document.getElementById('ssid').value = d.ssid; selectedSSID = d.ssid; }
+      for (let i = 0; i < 3; i++) {
+        if (d.devices && d.devices[i]) {
+          document.getElementById('dev' + i + 'name').value = d.devices[i].name || '';
+          document.getElementById('dev' + i + 'key').value  = d.devices[i].key  || '';
+        }
+      }
+      setActive(d.active_dev || 0);
+    } catch(_) { setActive(0); }
     await scanNetworks();
   })();
 </script>
@@ -532,9 +633,13 @@ void handleConfig() {
   loadPrefs();
   JsonDocument doc;
   doc["ssid"]       = savedSSID;
-  doc["server_url"] = savedServerUrl;
-  doc["api_key"]    = savedApiKey;
-  // Never expose password
+  doc["active_dev"] = activeDevice;
+  JsonArray devArr  = doc["devices"].to<JsonArray>();
+  for (int i = 0; i < MAX_DEVICES; i++) {
+    JsonObject o = devArr.add<JsonObject>();
+    o["name"] = devName[i];
+    o["key"]  = devKey[i];
+  }
   String out;
   serializeJson(doc, out);
   webServer.send(200, "application/json", out);
@@ -550,20 +655,27 @@ void handleSave() {
     webServer.send(400, "application/json", "{\"error\":\"Bad JSON\"}");
     return;
   }
-  String ssid      = doc["ssid"].as<String>();
-  String pass      = doc["pass"].as<String>();
-  String serverUrl = doc["server_url"].as<String>();
-  String apiKey    = doc["api_key"].as<String>();
 
-  if (!ssid.length() || !serverUrl.length() || !apiKey.length()) {
-    webServer.send(400, "application/json", "{\"error\":\"ssid, server_url, api_key required\"}");
+  String ssid = doc["ssid"].as<String>();
+  String pass = doc["pass"].as<String>();
+  int    act  = doc["active_dev"] | 0;
+  if (act < 0 || act >= MAX_DEVICES) act = 0;
+
+  String names[MAX_DEVICES], keys[MAX_DEVICES];
+  JsonArray devArr = doc["devices"].as<JsonArray>();
+  for (int i = 0; i < MAX_DEVICES; i++) {
+    names[i] = devArr[i]["name"].as<String>();
+    keys[i]  = devArr[i]["key"].as<String>();
+  }
+
+  if (!ssid.length() || !keys[act].length()) {
+    webServer.send(400, "application/json", "{\"error\":\"ssid and active device key required\"}");
     return;
   }
 
-  savePrefs(ssid, pass, serverUrl, apiKey);
+  savePrefs(ssid, pass, act, names, keys);
   webServer.send(200, "application/json", "{\"ok\":true}");
 
-  // Attempt to connect in background — non-blocking
   Serial.printf("[WiFi] Trying saved credentials: %s\n", ssid.c_str());
   WiFi.begin(ssid.c_str(), pass.c_str());
 }
@@ -575,7 +687,6 @@ void handleReset() {
   ESP.restart();
 }
 
-// Captive portal: redirect unknown hosts to config page
 void handleCaptive() {
   webServer.sendHeader("Location", "http://192.168.4.1/", true);
   webServer.send(302, "text/plain", "");
@@ -583,32 +694,28 @@ void handleCaptive() {
 
 void startAP() {
   WiFi.disconnect(true);
-  WiFi.mode(WIFI_AP_STA);   // AP + STA so we can scan in AP mode
+  WiFi.mode(WIFI_AP_STA);
   WiFi.softAP(AP_SSID, AP_PASS);
   delay(200);
 
   Serial.printf("[AP] Started: SSID=%s  IP=192.168.4.1\n", AP_SSID);
 
-  // DNS: redirect everything to 192.168.4.1 (captive portal)
   dnsServer.start(53, "*", IPAddress(192, 168, 4, 1));
 
-  // Web server routes
   webServer.on("/",       HTTP_GET,  handleRoot);
   webServer.on("/scan",   HTTP_GET,  handleScan);
   webServer.on("/status", HTTP_GET,  handleStatus);
   webServer.on("/config", HTTP_GET,  handleConfig);
   webServer.on("/save",   HTTP_POST, handleSave);
   webServer.on("/reset",  HTTP_POST, handleReset);
-  webServer.onNotFound(handleCaptive);  // captive portal fallback
+  webServer.onNotFound(handleCaptive);
   webServer.begin();
 
   Serial.println("[AP] Web server running — open http://192.168.4.1 in a browser");
-
-  // LED: slow blink in setup mode
   appState = SETUP_MODE;
 }
 
-// ── WiFi STA connection ───────────────────────────────────────────────────────
+// ── WiFi STA ──────────────────────────────────────────────────────────────────
 bool connectWiFi(const String &ssid, const String &pass) {
   Serial.printf("[WiFi] Connecting to %s", ssid.c_str());
   WiFi.mode(WIFI_STA);
@@ -680,16 +787,23 @@ void postLocation() {
   String payload;
   serializeJson(doc, payload);
 
-  loadPrefs();   // pick up latest server URL / API key
+  loadPrefs();
+  String activeKey = devKey[activeDevice];
+  if (!activeKey.length()) {
+    Serial.println("[POST] No API key configured");
+    return;
+  }
+
   HTTPClient http;
-  http.begin(savedServerUrl);
+  http.begin(SERVER_URL);
   http.addHeader("Content-Type", "application/json");
-  http.addHeader("X-Api-Key",    savedApiKey);
+  http.addHeader("X-Api-Key", activeKey);
   http.setTimeout(5000);
 
   int code = http.POST(payload);
   if (code == 201) {
-    Serial.printf("[POST] OK  lat=%.6f lng=%.6f sats=%d spd=%.1f km/h\n",
+    Serial.printf("[POST] OK  dev=%s lat=%.6f lng=%.6f sats=%d spd=%.1f km/h\n",
+      devName[activeDevice].length() ? devName[activeDevice].c_str() : "?",
       gps.location.lat(), gps.location.lng(),
       gps.satellites.isValid() ? (int)gps.satellites.value() : 0,
       gps.speed.isValid() ? gps.speed.kmph() : 0.0f);
@@ -705,7 +819,7 @@ void postLocation() {
 void setup() {
   Serial.begin(115200);
   delay(500);
-  Serial.println("\n=== GPS Tracker Firmware ===");
+  Serial.println("\n=== TraceX GPS Firmware ===");
 
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
@@ -713,10 +827,11 @@ void setup() {
   configureGPS();
   loadPrefs();
 
-  // Try saved Wi-Fi credentials
   if (savedSSID.length() > 0 && connectWiFi(savedSSID, savedPass)) {
     appState = TRACKING_MODE;
-    Serial.println("[APP] Tracking mode");
+    Serial.printf("[APP] Tracking mode — active device: %s (slot %d)\n",
+      devName[activeDevice].length() ? devName[activeDevice].c_str() : "unnamed",
+      activeDevice + 1);
   } else {
     Serial.println("[APP] No credentials or connection failed — starting setup AP");
     startAP();
@@ -726,33 +841,27 @@ void setup() {
 }
 
 void loop() {
-  // Feed GPS bytes
   while (gpsSerial.available()) gps.encode(gpsSerial.read());
 
-  // Warn if no NMEA data
   if (millis() > 5000 && gps.charsProcessed() < 10 && appState == TRACKING_MODE) {
     Serial.println("[GPS] WARNING: No NMEA data — check D21/D22 wiring");
     delay(2000);
     return;
   }
 
-  if (gps.location.isUpdated()) {
-    if (!gpsReady) {
-      gpsReady = true;
-      Serial.printf("[GPS] First fix! Sats=%d\n",
-        gps.satellites.isValid() ? (int)gps.satellites.value() : 0);
-    }
+  if (gps.location.isUpdated() && !gpsReady) {
+    gpsReady = true;
+    Serial.printf("[GPS] First fix! Sats=%d\n",
+      gps.satellites.isValid() ? (int)gps.satellites.value() : 0);
   }
 
   if (appState == SETUP_MODE) {
     dnsServer.processNextRequest();
     webServer.handleClient();
 
-    // LED: slow blink
     static unsigned long ledMs = 0;
     if (millis() - ledMs > 800) { ledMs = millis(); digitalWrite(LED_PIN, !digitalRead(LED_PIN)); }
 
-    // Check if user saved creds and we connected
     if (WiFi.status() == WL_CONNECTED) {
       Serial.println("[APP] Connected via web UI — switching to tracking mode");
       webServer.stop();
@@ -762,7 +871,6 @@ void loop() {
     return;
   }
 
-  // TRACKING_MODE
   unsigned long now = millis();
   if (now - lastPostMs >= POST_INTERVAL_MS) {
     lastPostMs = now;
