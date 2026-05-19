@@ -1,6 +1,3 @@
-CREATE DATABASE IF NOT EXISTS gps_tracker;
-USE gps_tracker;
-
 -- ── Users ────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS users (
   id            VARCHAR(36)  PRIMARY KEY DEFAULT (UUID()),

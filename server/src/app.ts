@@ -8,6 +8,7 @@ import rateLimit from 'express-rate-limit';
 
 import { config } from './config/env';
 import { testConnection } from './config/database';
+import { runMigrations } from './database/init';
 import { logger } from './utils/logger';
 import { initSocket } from './services/websocket.service';
 import { errorHandler } from './middleware/error.middleware';
@@ -55,6 +56,9 @@ app.use(errorHandler);
 async function bootstrap(): Promise<void> {
   await testConnection();
   logger.info('Database connected');
+
+  await runMigrations();
+  logger.info('Database migrations applied');
 
   initSocket(server);
 

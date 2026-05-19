@@ -1,29 +1,25 @@
 import fs from 'fs';
 import path from 'path';
-import mysql from 'mysql2/promise';
-import { config } from '../config/env';
+import { pool } from '../config/database';
 import { logger } from '../utils/logger';
 
-async function init(): Promise<void> {
-  // Connect without selecting a database first so we can CREATE it
-  const conn = await mysql.createConnection({
-    host: config.database.host,
-    port: config.database.port,
-    user: config.database.user,
-    password: config.database.password,
-    multipleStatements: true,
-  });
+export async function runMigrations(): Promise<void> {
+  const schemaPath = path.join(__dirname, 'schema.sql');
+  const schema = fs.readFileSync(schemaPath, 'utf8');
 
-  const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
+  // Split on statement boundaries and run each individually
+  const statements = schema
+    .split(';')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0 && !s.startsWith('--'));
 
-  logger.info('Running schema…');
-  await conn.query(schema);
-  logger.info('Database initialised successfully.');
-
-  await conn.end();
+  const conn = await pool.getConnection();
+  try {
+    for (const sql of statements) {
+      await conn.query(sql);
+    }
+    logger.info(`Ran ${statements.length} migration statements`);
+  } finally {
+    conn.release();
+  }
 }
-
-init().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});

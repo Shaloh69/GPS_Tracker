@@ -12,6 +12,7 @@ export const config = {
     user: process.env.DB_USER || 'root',
     password: process.env.DB_PASSWORD || '',
     name: process.env.DB_NAME || 'gps_tracker',
+    ssl: process.env.DB_SSL === 'true',
   },
 
   jwt: {
