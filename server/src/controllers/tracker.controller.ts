@@ -235,8 +235,7 @@ export async function getLocationHistory(req: AuthRequest, res: Response): Promi
     if (from) { query += ' AND created_at >= ?'; params.push(from); }
     if (to)   { query += ' AND created_at <= ?'; params.push(to); }
 
-    query += ' ORDER BY created_at DESC LIMIT ?';
-    params.push(limit);
+    query += ` ORDER BY created_at DESC LIMIT ${limit}`;
 
     const [rows] = await pool.execute<any[]>(query, params);
     res.json({ success: true, data: rows, count: rows.length });
