@@ -19,6 +19,9 @@ import trackerRoutes from './routes/tracker.routes';
 const app = express();
 const server = http.createServer(app);
 
+// Render (and most cloud providers) sit behind a reverse proxy
+app.set('trust proxy', 1);
+
 // ── Security & parsing ───────────────────────────────────────────────────────
 app.use(helmet());
 app.use(compression());
