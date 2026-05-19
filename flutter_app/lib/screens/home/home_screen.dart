@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:latlong2/latlong.dart';
 import 'package:provider/provider.dart';
 import '../../models/device.dart';
 import '../../services/auth_service.dart';
@@ -9,6 +11,16 @@ import '../../theme/app_theme.dart';
 import '../../widgets/gradient_background.dart';
 import '../device/add_device_screen.dart';
 import '../device/device_detail_screen.dart';
+
+String _timeAgo(DateTime? dt) {
+  if (dt == null) return 'Never';
+  final diff = DateTime.now().difference(dt.toLocal());
+  if (diff.inSeconds < 5) return 'just now';
+  if (diff.inSeconds < 60) return '${diff.inSeconds}s ago';
+  if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
+  if (diff.inHours < 24) return '${diff.inHours}h ago';
+  return '${diff.inDays}d ago';
+}
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -24,13 +36,19 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _load() async {
-    await context.read<TrackerService>().fetchDevices();
-    // Connect socket after devices loaded
-    final auth   = context.read<AuthService>();
-    final socket = context.read<SocketService>();
+    final tracker = context.read<TrackerService>();
+    final auth    = context.read<AuthService>();
+    final socket  = context.read<SocketService>();
+
+    await tracker.fetchDevices();
+    if (!mounted) return;
+
     if (!socket.connected && auth.accessToken != null) {
       socket.connect(auth.accessToken!);
+      await Future.delayed(const Duration(milliseconds: 800));
+      if (!mounted) return;
     }
+    socket.joinAll(tracker.devices.map((d) => d.id).toList());
   }
 
   @override
@@ -44,7 +62,13 @@ class _HomeScreenState extends State<HomeScreen> {
           child: RefreshIndicator(
             color: AppColors.blue500,
             backgroundColor: AppColors.surfaceCard,
-            onRefresh: tracker.fetchDevices,
+            onRefresh: () async {
+              await tracker.fetchDevices();
+              if (!mounted) return;
+              context.read<SocketService>().joinAll(
+                tracker.devices.map((d) => d.id).toList(),
+              );
+            },
             child: CustomScrollView(
               slivers: [
                 // ── App bar ──────────────────────────────────────────────
@@ -54,7 +78,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   title: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text('GPS Tracker',
+                      const Text('TraceX',
                           style: TextStyle(
                               fontWeight: FontWeight.w700, fontSize: 22)),
                       Text('Hello, ${auth.user?.displayName ?? ''}',
@@ -73,6 +97,14 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                   ],
                 ),
+
+                // ── Live map ─────────────────────────────────────────────
+                if (!tracker.loading)
+                  SliverToBoxAdapter(
+                    child: _LiveMapCard(
+                      devices: tracker.devices,
+                    ).animate().fadeIn(duration: 400.ms),
+                  ),
 
                 // ── Stats row ────────────────────────────────────────────
                 SliverToBoxAdapter(
@@ -99,7 +131,8 @@ class _HomeScreenState extends State<HomeScreen> {
                               size: 48, color: AppColors.blue700),
                           const SizedBox(height: 12),
                           Text(tracker.error!,
-                              style: const TextStyle(color: AppColors.blue300)),
+                              style: const TextStyle(
+                                  color: AppColors.blue300)),
                           const SizedBox(height: 16),
                           TextButton.icon(
                             onPressed: tracker.fetchDevices,
@@ -147,7 +180,8 @@ class _HomeScreenState extends State<HomeScreen> {
                                   deviceId: tracker.devices[i].id),
                             ),
                           ),
-                          onDelete: () => _confirmDelete(tracker.devices[i]),
+                          onDelete: () =>
+                              _confirmDelete(tracker.devices[i]),
                         ),
                         childCount: tracker.devices.length,
                       ),
@@ -164,7 +198,13 @@ class _HomeScreenState extends State<HomeScreen> {
             context,
             MaterialPageRoute(builder: (_) => const AddDeviceScreen()),
           );
-          if (added == true) tracker.fetchDevices();
+          if (added == true && mounted) {
+            final tracker = context.read<TrackerService>();
+            await tracker.fetchDevices();
+            context.read<SocketService>().joinAll(
+              tracker.devices.map((d) => d.id).toList(),
+            );
+          }
         },
         backgroundColor: AppColors.blue500,
         icon: const Icon(Icons.add),
@@ -180,7 +220,8 @@ class _HomeScreenState extends State<HomeScreen> {
         backgroundColor: AppColors.surfaceCard,
         title: const Text('Delete Device',
             style: TextStyle(color: Colors.white)),
-        content: Text('Remove "${device.name}" and all its location history?',
+        content: Text(
+            'Remove "${device.name}" and all its location history?',
             style: const TextStyle(color: AppColors.blue200)),
         actions: [
           TextButton(
@@ -208,6 +249,174 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 }
 
+// ── Live Map Card ─────────────────────────────────────────────────────────────
+class _LiveMapCard extends StatelessWidget {
+  final List<Device> devices;
+  const _LiveMapCard({required this.devices});
+
+  @override
+  Widget build(BuildContext context) {
+    final located = devices
+        .where((d) => d.latestLocation != null)
+        .toList();
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(20),
+        child: Container(
+          height: 260,
+          decoration: BoxDecoration(
+            border: Border.all(color: const Color(0x19FFFFFF)),
+            borderRadius: BorderRadius.circular(20),
+          ),
+          child: located.isEmpty
+              ? _EmptyMapPlaceholder(hasDevices: devices.isNotEmpty)
+              : _MapView(located: located),
+        ),
+      ),
+    );
+  }
+}
+
+class _EmptyMapPlaceholder extends StatelessWidget {
+  final bool hasDevices;
+  const _EmptyMapPlaceholder({required this.hasDevices});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: const Color(0xFF0D1730),
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.map_outlined,
+                size: 48, color: AppColors.blue800),
+            const SizedBox(height: 12),
+            Text(
+              hasDevices
+                  ? 'Waiting for GPS fix…'
+                  : 'No devices registered',
+              style: const TextStyle(
+                  color: AppColors.blue600, fontSize: 14),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MapView extends StatelessWidget {
+  final List<Device> located;
+  const _MapView({required this.located});
+
+  @override
+  Widget build(BuildContext context) {
+    final points = located
+        .map((d) => LatLng(
+            d.latestLocation!.lat, d.latestLocation!.lng))
+        .toList();
+
+    final isSingle = points.length == 1;
+
+    return FlutterMap(
+      key: ValueKey(located.map((d) => d.id).join()),
+      options: isSingle
+          ? MapOptions(
+              initialCenter: points.first,
+              initialZoom: 15,
+              interactionOptions:
+                  const InteractionOptions(flags: InteractiveFlag.all),
+            )
+          : MapOptions(
+              initialCameraFit: CameraFit.bounds(
+                bounds: LatLngBounds.fromPoints(points),
+                padding: const EdgeInsets.all(48),
+              ),
+              interactionOptions:
+                  const InteractionOptions(flags: InteractiveFlag.all),
+            ),
+      children: [
+        TileLayer(
+          urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+          userAgentPackageName: 'com.example.tracex',
+        ),
+        MarkerLayer(
+          markers: located.map((device) {
+            final loc = device.latestLocation!;
+            return Marker(
+              point: LatLng(loc.lat, loc.lng),
+              width: 130,
+              height: 62,
+              alignment: Alignment.bottomCenter,
+              child: GestureDetector(
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) =>
+                        DeviceDetailScreen(deviceId: device.id),
+                  ),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: device.isOnline
+                            ? AppColors.green
+                            : AppColors.blue700,
+                        borderRadius: BorderRadius.circular(8),
+                        boxShadow: [
+                          BoxShadow(
+                            color: (device.isOnline
+                                    ? AppColors.green
+                                    : AppColors.blue700)
+                                .withAlpha(100),
+                            blurRadius: 6,
+                          ),
+                        ],
+                      ),
+                      child: Text(
+                        device.name,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 10,
+                          fontWeight: FontWeight.w700,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    Icon(
+                      Icons.location_on_rounded,
+                      color: device.isOnline
+                          ? AppColors.green
+                          : AppColors.blue500,
+                      size: 30,
+                      shadows: [
+                        Shadow(
+                          color: (device.isOnline
+                                  ? AppColors.green
+                                  : AppColors.blue500)
+                              .withAlpha(120),
+                          blurRadius: 8,
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            );
+          }).toList(),
+        ),
+      ],
+    );
+  }
+}
+
 // ── Stats row ─────────────────────────────────────────────────────────────────
 class _StatsRow extends StatelessWidget {
   final List<Device> devices;
@@ -217,16 +426,22 @@ class _StatsRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final online = devices.where((d) => d.isOnline).length;
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
       child: Row(
         children: [
-          _Stat(label: 'Total',  value: '${devices.length}',
+          _Stat(
+              label: 'Total',
+              value: '${devices.length}',
               color: AppColors.blue400),
           const SizedBox(width: 12),
-          _Stat(label: 'Online', value: '$online',
+          _Stat(
+              label: 'Online',
+              value: '$online',
               color: AppColors.green),
           const SizedBox(width: 12),
-          _Stat(label: 'Offline', value: '${devices.length - online}',
+          _Stat(
+              label: 'Offline',
+              value: '${devices.length - online}',
               color: AppColors.blue700),
         ],
       ),
@@ -238,7 +453,8 @@ class _Stat extends StatelessWidget {
   final String label;
   final String value;
   final Color color;
-  const _Stat({required this.label, required this.value, required this.color});
+  const _Stat(
+      {required this.label, required this.value, required this.color});
 
   @override
   Widget build(BuildContext context) {
@@ -302,34 +518,39 @@ class _DeviceCard extends StatelessWidget {
           ),
           child: Row(
             children: [
-              // Status indicator
               Container(
-                width: 42, height: 42,
+                width: 42,
+                height: 42,
                 decoration: BoxDecoration(
-                  color: (device.isOnline ? AppColors.green : AppColors.blue800)
+                  color: (device.isOnline
+                          ? AppColors.green
+                          : AppColors.blue800)
                       .withAlpha(30),
                   borderRadius: BorderRadius.circular(12),
                 ),
                 child: Icon(
                   Icons.location_on_rounded,
-                  color: device.isOnline ? AppColors.green : AppColors.blue700,
+                  color: device.isOnline
+                      ? AppColors.green
+                      : AppColors.blue700,
                   size: 22,
                 ),
               ),
               const SizedBox(width: 14),
-
-              // Info
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Row(
                       children: [
-                        Text(device.name,
-                            style: const TextStyle(
-                                color: Colors.white,
-                                fontWeight: FontWeight.w600,
-                                fontSize: 15)),
+                        Expanded(
+                          child: Text(device.name,
+                              style: const TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 15),
+                              overflow: TextOverflow.ellipsis),
+                        ),
                         const SizedBox(width: 8),
                         Container(
                           padding: const EdgeInsets.symmetric(
@@ -355,27 +576,36 @@ class _DeviceCard extends StatelessWidget {
                       ],
                     ),
                     const SizedBox(height: 4),
-                    if (loc != null)
+                    if (loc != null) ...[
                       Text(loc.coordsLabel,
                           style: const TextStyle(
-                              color: AppColors.blue300, fontSize: 12))
-                    else
-                      const Text('No location data yet',
-                          style: TextStyle(
-                              color: AppColors.blue700, fontSize: 12)),
-                    if (loc != null) ...[
+                              color: AppColors.blue300, fontSize: 12)),
                       const SizedBox(height: 2),
                       Text(
                         '${loc.speedLabel}  ·  ${loc.satellites ?? '--'} sats',
                         style: const TextStyle(
                             color: AppColors.blue600, fontSize: 11),
                       ),
-                    ],
+                    ] else
+                      const Text('No location data yet',
+                          style: TextStyle(
+                              color: AppColors.blue700, fontSize: 12)),
+                    const SizedBox(height: 3),
+                    Row(
+                      children: [
+                        const Icon(Icons.access_time_rounded,
+                            size: 11, color: AppColors.blue600),
+                        const SizedBox(width: 3),
+                        Text(
+                          'Last seen: ${_timeAgo(device.lastSeen)}',
+                          style: const TextStyle(
+                              color: AppColors.blue600, fontSize: 11),
+                        ),
+                      ],
+                    ),
                   ],
                 ),
               ),
-
-              // Actions
               Column(
                 children: [
                   const Icon(Icons.chevron_right,

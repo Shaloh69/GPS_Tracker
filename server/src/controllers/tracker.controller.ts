@@ -35,8 +35,15 @@ export async function createDevice(req: AuthRequest, res: Response): Promise<voi
 export async function listDevices(req: AuthRequest, res: Response): Promise<void> {
   try {
     const [rows] = await pool.execute<any[]>(
-      `SELECT id, name, is_active, is_online, last_seen, created_at
-       FROM devices WHERE owner_id = ? ORDER BY created_at DESC`,
+      `SELECT d.id, d.name, d.is_active, d.is_online, d.last_seen, d.created_at,
+              l.id AS loc_id, l.lat, l.lng, l.speed, l.course, l.altitude,
+              l.satellites, l.hdop, l.gps_timestamp, l.created_at AS location_at
+       FROM devices d
+       LEFT JOIN locations l ON l.id = (
+         SELECT id FROM locations WHERE device_id = d.id ORDER BY created_at DESC LIMIT 1
+       )
+       WHERE d.owner_id = ?
+       ORDER BY d.created_at DESC`,
       [req.user!.id]
     );
     res.json({ success: true, data: rows });
@@ -149,6 +156,8 @@ export async function postLocation(req: AuthRequest, res: Response): Promise<voi
       deviceName: device.name,
       location: locationRow,
     });
+
+    logger.info(`[DEVICE] ${device.name} (${device.id.slice(0, 8)}) → lat=${lat.toFixed(6)} lng=${lng.toFixed(6)} sats=${body.satellites ?? '?'} spd=${body.speed?.toFixed(1) ?? '?'} km/h`);
 
     res.status(201).json({ success: true, data: locationRow });
   } catch (err) {

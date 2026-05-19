@@ -58,6 +58,7 @@ class TrackerService extends ChangeNotifier {
     _devices[idx] = _devices[idx].copyWith(
       isOnline: true,
       latestLocation: location,
+      lastSeen: DateTime.now(),
     );
     notifyListeners();
   }

@@ -42,13 +42,24 @@ class SocketService extends ChangeNotifier {
       ..connect();
   }
 
+  // Join a single device room
   void joinDevice(String deviceId) {
-    _socket?.emit('join:device', deviceId);
+    _socket?.emit('join:device', {'deviceId': deviceId});
     debugPrint('[WS] Joined device:$deviceId');
   }
 
+  // Join all device rooms at once (home screen)
+  void joinAll(List<String> deviceIds) {
+    for (final id in deviceIds) {
+      _socket?.emit('join:device', {'deviceId': id});
+    }
+    if (deviceIds.isNotEmpty) {
+      debugPrint('[WS] Joined ${deviceIds.length} device rooms');
+    }
+  }
+
   void leaveDevice(String deviceId) {
-    _socket?.emit('leave:device', deviceId);
+    _socket?.emit('leave:device', {'deviceId': deviceId});
     debugPrint('[WS] Left device:$deviceId');
   }
 
@@ -62,7 +73,7 @@ class SocketService extends ChangeNotifier {
 
   void _onLocationUpdate(dynamic raw) {
     try {
-      final data = raw as Map<dynamic, dynamic>;
+      final data     = raw as Map<dynamic, dynamic>;
       final deviceId = data['deviceId'] as String;
       final locRaw   = Map<String, dynamic>.from(data['location'] as Map);
       final location = DeviceLocation.fromJson(locRaw);
