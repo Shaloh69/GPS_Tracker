@@ -746,16 +746,36 @@ void ensureWiFi() {
 
 // ── GPS config ────────────────────────────────────────────────────────────────
 void configureGPS() {
-  Serial.println("[GPS] Starting at 9600 baud…");
-  gpsSerial.begin(GPS_BAUD_INIT, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
-  delay(500);
-  Serial.println("[GPS] Switching to 115200 baud…");
-  sendUBX(gpsSerial, UBX_SET_BAUD_115200, sizeof(UBX_SET_BAUD_115200));
-  delay(100);
-  gpsSerial.end();
-  delay(50);
+  // Try 115200 first — module may already be configured from a previous boot
+  Serial.println("[GPS] Probing at 115200…");
   gpsSerial.begin(GPS_BAUD_FAST, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
-  delay(200);
+  delay(600);
+
+  bool gotData = false;
+  unsigned long t = millis();
+  while (millis() - t < 1200) {
+    if (gpsSerial.available()) { gotData = true; break; }
+    delay(10);
+  }
+
+  if (!gotData) {
+    // No data at 115200 — module is still at factory 9600
+    Serial.println("[GPS] No data at 115200, falling back to 9600…");
+    gpsSerial.end();
+    delay(50);
+    gpsSerial.begin(GPS_BAUD_INIT, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
+    delay(500);
+    Serial.println("[GPS] Switching to 115200…");
+    sendUBX(gpsSerial, UBX_SET_BAUD_115200, sizeof(UBX_SET_BAUD_115200));
+    delay(150);
+    gpsSerial.end();
+    delay(50);
+    gpsSerial.begin(GPS_BAUD_FAST, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
+    delay(300);
+  } else {
+    Serial.println("[GPS] Responding at 115200");
+  }
+
   Serial.println("[GPS] Setting 10 Hz rate…");
   sendUBX(gpsSerial, UBX_SET_RATE_10HZ, sizeof(UBX_SET_RATE_10HZ));
   delay(100);
