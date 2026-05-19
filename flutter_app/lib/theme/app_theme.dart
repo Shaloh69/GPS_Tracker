@@ -51,7 +51,7 @@ ThemeData buildDarkTheme() {
     ),
     scaffoldBackgroundColor: AppColors.surface,
     cardColor: AppColors.surfaceCard,
-    cardTheme: CardTheme(
+    cardTheme: CardThemeData(
       color: AppColors.surfaceCard,
       elevation: 0,
       shape: RoundedRectangleBorder(
