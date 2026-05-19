@@ -137,11 +137,11 @@ void postLocation() {
   JsonDocument doc;
   doc["lat"]        = gps.location.lat();
   doc["lng"]        = gps.location.lng();
-  doc["speed"]      = gps.speed.isValid()    ? gps.speed.kmph()         : JsonNull{};
-  doc["course"]     = gps.course.isValid()   ? gps.course.deg()         : JsonNull{};
-  doc["altitude"]   = gps.altitude.isValid() ? gps.altitude.meters()    : JsonNull{};
-  doc["satellites"] = gps.satellites.isValid()? (int)gps.satellites.value() : JsonNull{};
-  doc["hdop"]       = gps.hdop.isValid()     ? gps.hdop.hdop()          : JsonNull{};
+  if (gps.speed.isValid())     doc["speed"]      = gps.speed.kmph();
+  if (gps.course.isValid())    doc["course"]     = gps.course.deg();
+  if (gps.altitude.isValid())  doc["altitude"]   = gps.altitude.meters();
+  if (gps.satellites.isValid()) doc["satellites"] = (int)gps.satellites.value();
+  if (gps.hdop.isValid())      doc["hdop"]       = gps.hdop.hdop();
 
   if (gps.date.isValid() && gps.time.isValid()) {
     char ts[25];
