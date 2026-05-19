@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <WebServer.h>
 #include <DNSServer.h>
 #include <Preferences.h>
@@ -17,13 +18,16 @@
 #define LED_PIN          2
 
 // ── Server (hardcoded) ────────────────────────────────────────────────────────
-#define SERVER_URL "https://gps-tracker-xw5w.onrender.com/api/v1/tracker/location"
+#define SERVER_URL  "https://gps-tracker-xw5w.onrender.com/api/v1/tracker/location"
+#define PING_URL    "https://gps-tracker-xw5w.onrender.com/api/v1/tracker/ping"
+#define PING_INTERVAL_MS 10000
 
 // ── WiFi Manager config ───────────────────────────────────────────────────────
 #define AP_SSID               "GPS-Tracker-Setup"
 #define AP_PASS               ""
 #define WIFI_CONNECT_TIMEOUT  15000
 #define MAX_DEVICES           3
+#define FORCE_AP_PIN          0    // GPIO0 = BOOT button on ESP32 DevKit
 
 // ── App state ─────────────────────────────────────────────────────────────────
 enum AppState { SETUP_MODE, TRACKING_MODE };
@@ -36,7 +40,9 @@ Preferences prefs;
 TinyGPSPlus gps;
 HardwareSerial gpsSerial(2);
 
-unsigned long lastPostMs = 0;
+unsigned long lastPostMs  = 0;
+unsigned long lastPingMs  = 0;
+unsigned long bootHoldMs  = 0;   // BOOT button long-press tracker
 bool gpsReady = false;
 
 // Credentials loaded from NVS
@@ -354,7 +360,7 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
 
   <!-- Devices -->
   <div class="card">
-    <div class="card-title">🛰 Devices <span style="color:#475569;font-size:11px;font-weight:500;text-transform:none;letter-spacing:0">(tap Activate to select)</span></div>
+    <div class="card-title">🛰 Devices <span style="color:#475569;font-size:11px;font-weight:500;text-transform:none;letter-spacing:0">Add device in TraceX app first, then paste key below</span></div>
 
     <div id="slot0" class="device-slot">
       <div class="slot-header">
@@ -368,7 +374,7 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
       <div class="field" style="margin-bottom:0">
         <label>API Key</label>
         <div class="input-wrap">
-          <input type="password" id="dev0key" placeholder="64-character key from TraceX app">
+          <input type="password" id="dev0key" placeholder="TraceX app → Add Device → copy key here">
           <span class="eye" onclick="toggleField('dev0key')">👁</span>
         </div>
       </div>
@@ -386,7 +392,7 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
       <div class="field" style="margin-bottom:0">
         <label>API Key</label>
         <div class="input-wrap">
-          <input type="password" id="dev1key" placeholder="64-character key from TraceX app">
+          <input type="password" id="dev1key" placeholder="TraceX app → Add Device → copy key here">
           <span class="eye" onclick="toggleField('dev1key')">👁</span>
         </div>
       </div>
@@ -404,7 +410,7 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
       <div class="field" style="margin-bottom:0">
         <label>API Key</label>
         <div class="input-wrap">
-          <input type="password" id="dev2key" placeholder="64-character key from TraceX app">
+          <input type="password" id="dev2key" placeholder="TraceX app → Add Device → copy key here">
           <span class="eye" onclick="toggleField('dev2key')">👁</span>
         </div>
       </div>
@@ -784,6 +790,28 @@ void configureGPS() {
   Serial.println("[GPS] Configured. Waiting for satellite lock…");
 }
 
+// ── Heartbeat ping ────────────────────────────────────────────────────────────
+void pingServer() {
+  String activeKey = devKey[activeDevice];
+  if (!activeKey.length()) return;
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  http.begin(client, PING_URL);
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("X-Api-Key", activeKey);
+  http.setTimeout(5000);
+  int code = http.POST("{}");
+  if (code == 200) {
+    Serial.printf("[PING] Online ✓  dev=%s\n",
+      devName[activeDevice].length() ? devName[activeDevice].c_str() : "?");
+  } else {
+    Serial.printf("[PING] Failed HTTP %d\n", code);
+  }
+  http.end();
+}
+
 // ── HTTP POST GPS fix ─────────────────────────────────────────────────────────
 void postLocation() {
   if (!gps.location.isValid() || !gps.location.isUpdated()) return;
@@ -807,15 +835,16 @@ void postLocation() {
   String payload;
   serializeJson(doc, payload);
 
-  loadPrefs();
   String activeKey = devKey[activeDevice];
   if (!activeKey.length()) {
     Serial.println("[POST] No API key configured");
     return;
   }
 
+  WiFiClientSecure client;
+  client.setInsecure();  // skip cert verification for Render's TLS
   HTTPClient http;
-  http.begin(SERVER_URL);
+  http.begin(client, SERVER_URL);
   http.addHeader("Content-Type", "application/json");
   http.addHeader("X-Api-Key", activeKey);
   http.setTimeout(5000);
@@ -843,15 +872,22 @@ void setup() {
 
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
+  pinMode(FORCE_AP_PIN, INPUT_PULLUP);
 
   configureGPS();
   loadPrefs();
 
-  if (savedSSID.length() > 0 && connectWiFi(savedSSID, savedPass)) {
+  // Hold BOOT button at power-on → force setup portal regardless of saved creds
+  if (digitalRead(FORCE_AP_PIN) == LOW) {
+    Serial.println("[APP] BOOT button held — forcing setup mode");
+    startAP();
+  } else if (savedSSID.length() > 0 && connectWiFi(savedSSID, savedPass)) {
     appState = TRACKING_MODE;
     Serial.printf("[APP] Tracking mode — active device: %s (slot %d)\n",
       devName[activeDevice].length() ? devName[activeDevice].c_str() : "unnamed",
       activeDevice + 1);
+    Serial.println("[APP] Tip: hold BOOT button 3 s to return to setup mode");
+    pingServer();  // mark device online immediately on WiFi connect
   } else {
     Serial.println("[APP] No credentials or connection failed — starting setup AP");
     startAP();
@@ -887,11 +923,33 @@ void loop() {
       webServer.stop();
       dnsServer.stop();
       appState = TRACKING_MODE;
+      pingServer();  // mark device online immediately
     }
     return;
   }
 
+  // BOOT button long-press (3 s) while tracking → re-enter setup portal
+  if (digitalRead(FORCE_AP_PIN) == LOW) {
+    if (bootHoldMs == 0) bootHoldMs = millis();
+    if (millis() - bootHoldMs >= 3000) {
+      bootHoldMs = 0;
+      Serial.println("[APP] BOOT held 3 s — returning to setup mode");
+      startAP();
+      return;
+    }
+  } else {
+    bootHoldMs = 0;
+  }
+
   unsigned long now = millis();
+
+  // Heartbeat — keep device marked online every 10 s regardless of GPS
+  if (now - lastPingMs >= PING_INTERVAL_MS) {
+    lastPingMs = now;
+    ensureWiFi();
+    pingServer();
+  }
+
   if (now - lastPostMs >= POST_INTERVAL_MS) {
     lastPostMs = now;
     ensureWiFi();

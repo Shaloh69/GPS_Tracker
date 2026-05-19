@@ -39,6 +39,7 @@ class SocketService extends ChangeNotifier {
       })
       ..onConnectError((e) => debugPrint('[WS] Error: $e'))
       ..on('location:update', _onLocationUpdate)
+      ..on('device:status', _onDeviceStatus)
       ..connect();
   }
 
@@ -80,6 +81,17 @@ class SocketService extends ChangeNotifier {
       _tracker.applyLiveLocation(deviceId, location);
     } catch (e) {
       debugPrint('[WS] location:update parse error: $e');
+    }
+  }
+
+  void _onDeviceStatus(dynamic raw) {
+    try {
+      final data     = raw as Map<dynamic, dynamic>;
+      final deviceId = data['deviceId'] as String;
+      final isOnline = data['isOnline'] as bool? ?? false;
+      _tracker.markDeviceOnline(deviceId, isOnline);
+    } catch (e) {
+      debugPrint('[WS] device:status parse error: $e');
     }
   }
 }

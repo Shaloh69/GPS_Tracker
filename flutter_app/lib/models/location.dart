@@ -36,10 +36,11 @@ class DeviceLocation {
         satellites:   (j['satellites'] as num?)?.toInt(),
         hdop:         (j['hdop'] as num?)?.toDouble(),
         gpsTimestamp: j['gps_timestamp'] != null
-            ? DateTime.tryParse(j['gps_timestamp'] as String)
+            ? DateTime.tryParse(j['gps_timestamp'].toString())
             : null,
-        createdAt: DateTime.parse(
-            (j['created_at'] ?? j['location_at']) as String),
+        createdAt: DateTime.tryParse(
+            (j['created_at'] ?? j['location_at'])?.toString() ?? '') ??
+            DateTime.now(),
       );
 
   String get speedLabel =>

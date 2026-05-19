@@ -35,7 +35,10 @@ export async function createDevice(req: AuthRequest, res: Response): Promise<voi
 export async function listDevices(req: AuthRequest, res: Response): Promise<void> {
   try {
     const [rows] = await pool.execute<any[]>(
-      `SELECT d.id, d.name, d.is_active, d.is_online, d.last_seen, d.created_at,
+      `SELECT d.id, d.name, d.is_active, d.last_seen, d.created_at,
+              CASE WHEN d.last_seen IS NOT NULL
+                    AND TIMESTAMPDIFF(SECOND, d.last_seen, NOW()) < 30
+                   THEN 1 ELSE 0 END AS is_online,
               l.id AS loc_id, l.lat, l.lng, l.speed, l.course, l.altitude,
               l.satellites, l.hdop, l.gps_timestamp, l.created_at AS location_at
        FROM devices d
@@ -49,6 +52,26 @@ export async function listDevices(req: AuthRequest, res: Response): Promise<void
     res.json({ success: true, data: rows });
   } catch (err) {
     logger.error('listDevices error', err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+}
+
+// ── Heartbeat ping (called by ESP32 every 10 s, no GPS needed) ───────────────
+
+export async function pingDevice(req: AuthRequest, res: Response): Promise<void> {
+  const device = req.device!;
+  try {
+    await pool.execute(
+      'UPDATE devices SET last_seen = NOW(), is_online = TRUE WHERE id = ?',
+      [device.id]
+    );
+    getIO().to(`device:${device.id}`).emit('device:status', {
+      deviceId: device.id,
+      isOnline: true,
+    });
+    res.json({ success: true });
+  } catch (err) {
+    logger.error('pingDevice error', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 }

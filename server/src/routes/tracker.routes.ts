@@ -6,6 +6,7 @@ import {
   getDevice,
   deleteDevice,
   postLocation,
+  pingDevice,
   getLatestLocation,
   getLocationHistory,
 } from '../controllers/tracker.controller';
@@ -23,6 +24,9 @@ router.post(
 router.get('/devices', requireAuth, listDevices);
 router.get('/devices/:deviceId', requireAuth, param('deviceId').isUUID(), getDevice);
 router.delete('/devices/:deviceId', requireAuth, param('deviceId').isUUID(), deleteDevice);
+
+// ── Device heartbeat (requires device X-Api-Key) ─────────────────────────────
+router.post('/ping', requireDeviceKey, pingDevice);
 
 // ── Location ingestion (requires device X-Api-Key) ────────────────────────────
 router.post(

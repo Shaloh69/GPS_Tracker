@@ -13,28 +13,28 @@ class ApiService {
         if (_accessToken != null) 'Authorization': 'Bearer $_accessToken',
       };
 
+  static const _timeout = Duration(seconds: 15);
+
   Future<Map<String, dynamic>> get(String path) async {
-    final res = await http.get(
-      Uri.parse('$kBaseUrl$path'),
-      headers: _headers,
-    );
+    final res = await http
+        .get(Uri.parse('$kBaseUrl$path'), headers: _headers)
+        .timeout(_timeout);
     return _parse(res);
   }
 
-  Future<Map<String, dynamic>> post(String path, Map<String, dynamic> body) async {
-    final res = await http.post(
-      Uri.parse('$kBaseUrl$path'),
-      headers: _headers,
-      body: jsonEncode(body),
-    );
+  Future<Map<String, dynamic>> post(
+      String path, Map<String, dynamic> body) async {
+    final res = await http
+        .post(Uri.parse('$kBaseUrl$path'),
+            headers: _headers, body: jsonEncode(body))
+        .timeout(_timeout);
     return _parse(res);
   }
 
   Future<Map<String, dynamic>> delete(String path) async {
-    final res = await http.delete(
-      Uri.parse('$kBaseUrl$path'),
-      headers: _headers,
-    );
+    final res = await http
+        .delete(Uri.parse('$kBaseUrl$path'), headers: _headers)
+        .timeout(_timeout);
     return _parse(res);
   }
 
