@@ -1,22 +1,38 @@
-# Node / Server
+# ── Node / Server ─────────────────────────────────────────────────────────────
 server/node_modules/
 server/dist/
 server/.env
 
-# Flutter
+# ── Flutter ───────────────────────────────────────────────────────────────────
+# Build artifacts
+flutter_app/build/
 flutter_app/.dart_tool/
 flutter_app/.flutter-plugins
 flutter_app/.flutter-plugins-dependencies
-flutter_app/build/
-flutter_app/*.iml
 flutter_app/.packages
 flutter_app/pubspec.lock
+flutter_app/*.iml
 
-# PlatformIO
+# Auto-generated Flutter boilerplate (Android-only project)
+flutter_app/.metadata
+flutter_app/README.md
+flutter_app/analysis_options.yaml
+
+# Unused platform targets (this project targets Android only)
+flutter_app/ios/
+flutter_app/linux/
+flutter_app/macos/
+flutter_app/web/
+flutter_app/windows/
+
+# Test stubs (no tests written yet)
+flutter_app/test/
+
+# ── PlatformIO / ESP32 ────────────────────────────────────────────────────────
 esp32/.pio/
 esp32/.vscode/
 
-# General
+# ── General ───────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
 *.log
