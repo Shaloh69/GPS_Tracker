@@ -838,7 +838,7 @@ void postLocation() {
   if (gps.hdop.isValid())       doc["hdop"]      = gps.hdop.hdop();
   if (gps.date.isValid() && gps.time.isValid()) {
     char ts[25];
-    snprintf(ts, sizeof(ts), "%04d-%02d-%02dT%02d:%02d:%02dZ",
+    snprintf(ts, sizeof(ts), "%04d-%02d-%02d %02d:%02d:%02d",
       gps.date.year(), gps.date.month(), gps.date.day(),
       gps.time.hour(), gps.time.minute(), gps.time.second());
     doc["gps_timestamp"] = ts;
