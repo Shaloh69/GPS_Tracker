@@ -21,7 +21,7 @@
 // ── Server ────────────────────────────────────────────────────────────────────
 #define SERVER_URL       "https://gps-tracker-xw5w.onrender.com/api/v1/tracker/location"
 #define PING_URL         "https://gps-tracker-xw5w.onrender.com/api/v1/tracker/ping"
-#define PING_INTERVAL_MS 10000
+#define PING_INTERVAL_MS 30000
 
 // ── WiFi Manager config ───────────────────────────────────────────────────────
 #define AP_SSID              "GPS-Tracker-Setup"
