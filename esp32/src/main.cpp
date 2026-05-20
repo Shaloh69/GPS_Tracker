@@ -46,7 +46,8 @@ unsigned long lastSysMs    = 0;
 unsigned long lastGpsLogMs = 0;
 unsigned long bootHoldMs   = 0;
 bool gpsReady              = false;
-bool deviceRegistered      = false; // true after first successful 200 ping
+bool deviceRegistered      = false;
+bool gpsNmeaStarted        = false; // true once NMEA chars start arriving
 
 #define SYS_LOG_INTERVAL_MS  30000  // system health log every 30 s
 #define GPS_LOG_INTERVAL_MS   5000  // GPS-waiting log every 5 s (not every 1 s)
@@ -724,18 +725,33 @@ void configureGPS() {
   }
 
   if (!gotData) {
-    Serial.println("[GPS] No data at 115200, falling back to 9600…");
+    Serial.println("[GPS] No data at 115200 — module may be at default 9600 baud");
+    Serial.println("[GPS] Check wiring: NEO-6M TX → GPIO21,  NEO-6M RX → GPIO22,  VCC → 3.3V");
     gpsSerial.end(); delay(50);
     gpsSerial.begin(GPS_BAUD_INIT, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
     delay(500);
-    Serial.println("[GPS] Switching to 115200…");
+
+    // Try reading at 9600 to confirm module is wired correctly
+    bool gotAt9600 = false;
+    unsigned long t2 = millis();
+    while (millis() - t2 < 1000) {
+      if (gpsSerial.available()) { gotAt9600 = true; break; }
+      delay(10);
+    }
+    if (!gotAt9600) {
+      Serial.println("[GPS] ✗ NO DATA at 9600 either — check wiring and power!");
+    } else {
+      Serial.println("[GPS] ✓ Module found at 9600 — reconfiguring to 115200…");
+    }
+
     sendUBX(gpsSerial, UBX_SET_BAUD_115200, sizeof(UBX_SET_BAUD_115200));
     delay(150);
     gpsSerial.end(); delay(50);
     gpsSerial.begin(GPS_BAUD_FAST, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
     delay(300);
   } else {
-    Serial.println("[GPS] Responding at 115200");
+    Serial.println("[GPS] ✓ Module connected — NEO-6M responding at 115200 baud");
+    Serial.printf("[GPS]   RX pin: GPIO%d  TX pin: GPIO%d\n", GPS_RX_PIN, GPS_TX_PIN);
   }
 
   Serial.println("[GPS] Setting 1 Hz rate…");
@@ -743,7 +759,8 @@ void configureGPS() {
   delay(100);
   sendUBX(gpsSerial, UBX_SAVE_CONFIG, sizeof(UBX_SAVE_CONFIG));
   delay(200);
-  Serial.println("[GPS] Configured. Waiting for satellite lock…");
+  Serial.println("[GPS] ✓ Configuration saved — waiting for satellite lock…");
+  Serial.println("[GPS]   LED off/solid = searching  |  LED blinks 1/s = fix acquired");
 }
 
 // ── Heartbeat ping ────────────────────────────────────────────────────────────
@@ -872,8 +889,16 @@ void setup() {
 void loop() {
   while (gpsSerial.available()) gps.encode(gpsSerial.read());
 
+  // First time NMEA chars arrive — GPS module is communicating
+  if (!gpsNmeaStarted && gps.charsProcessed() > 10) {
+    gpsNmeaStarted = true;
+    Serial.println("[GPS] ✓ NMEA data flowing — module is connected and communicating with ESP32");
+    Serial.println("[GPS]   Waiting for satellite lock  (LED blinks 1/s when locked)");
+  }
+
   if (millis() > 5000 && gps.charsProcessed() < 10 && appState == TRACKING_MODE) {
-    Serial.println("[GPS] WARNING: No NMEA data — check D21/D22 wiring");
+    Serial.println("[GPS] ✗ No NMEA data received — check wiring:");
+    Serial.println("[GPS]   NEO-6M TX → GPIO21  |  NEO-6M RX → GPIO22  |  VCC → 3.3V  |  GND → GND");
     delay(2000);
     return;
   }
