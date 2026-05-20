@@ -321,7 +321,7 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
       </div>
       <div class="modal-row">
         <button class="btn-cancel" onclick="closeDlModal()">Cancel</button>
-        <a id="dlLink" href="/qr.svg" download="tracex-device-qr.svg" class="btn-dl-confirm" onclick="closeDlModal()">&#11015; Download</a>
+        <button class="btn-dl-confirm" onclick="doDownloadQR()">&#11015; Download PNG</button>
       </div>
     </div>
   </div>
@@ -397,6 +397,27 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
   function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
   function showDlModal(){document.getElementById('dlModal').classList.add('show');}
   function closeDlModal(){document.getElementById('dlModal').classList.remove('show');}
+  function doDownloadQR(){
+    closeDlModal();
+    var img=new Image();
+    img.crossOrigin='anonymous';
+    img.onload=function(){
+      var c=document.createElement('canvas');
+      c.width=img.naturalWidth||216;c.height=img.naturalHeight||216;
+      var ctx=c.getContext('2d');
+      ctx.fillStyle='#ffffff';ctx.fillRect(0,0,c.width,c.height);
+      ctx.drawImage(img,0,0);
+      var a=document.createElement('a');
+      a.href=c.toDataURL('image/png');
+      a.download='tracex-device-qr.png';
+      document.body.appendChild(a);a.click();document.body.removeChild(a);
+    };
+    img.onerror=function(){
+      var a=document.createElement('a');a.href='/qr.svg';a.download='tracex-device-qr.svg';
+      document.body.appendChild(a);a.click();document.body.removeChild(a);
+    };
+    img.src='/qr.svg?t='+Date.now();
+  }
   var toastTimer;
   function toast(msg,type){
     var el=document.getElementById('toast');el.textContent=msg;el.className='show '+(type||'');
