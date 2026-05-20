@@ -9,14 +9,26 @@ import { getIO } from '../services/websocket.service';
 // ── Device management ─────────────────────────────────────────────────────────
 
 export async function createDevice(req: AuthRequest, res: Response): Promise<void> {
-  const { name } = req.body;
+  const { name, api_key } = req.body;
   if (!name?.trim()) {
     res.status(400).json({ success: false, message: 'name is required' });
     return;
   }
+
+  // Accept caller-supplied key (QR scan flow) or generate one (legacy flow)
+  let apiKey: string;
+  if (api_key) {
+    if (!/^[0-9a-f]{64}$/.test(api_key)) {
+      res.status(400).json({ success: false, message: 'Invalid api_key — must be 64 hex chars' });
+      return;
+    }
+    apiKey = api_key;
+  } else {
+    apiKey = crypto.randomBytes(32).toString('hex');
+  }
+
   try {
     const id = uuidv4();
-    const apiKey = crypto.randomBytes(32).toString('hex'); // 64-char hex key
     await pool.execute(
       'INSERT INTO devices (id, name, api_key, owner_id) VALUES (?, ?, ?, ?)',
       [id, name.trim(), apiKey, req.user!.id]
@@ -24,9 +36,13 @@ export async function createDevice(req: AuthRequest, res: Response): Promise<voi
     res.status(201).json({
       success: true,
       data: { id, name: name.trim(), api_key: apiKey },
-      message: 'Save the api_key — it will not be shown again.',
+      message: 'Device registered successfully.',
     });
-  } catch (err) {
+  } catch (err: any) {
+    if (err.code === 'ER_DUP_ENTRY') {
+      res.status(409).json({ success: false, message: 'This device is already registered to an account' });
+      return;
+    }
     logger.error('createDevice error', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }

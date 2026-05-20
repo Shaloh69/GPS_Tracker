@@ -36,12 +36,13 @@ class TrackerService extends ChangeNotifier {
     }
   }
 
-  Future<Map<String, dynamic>> createDevice(String name) async {
-    final res = await _api.post('/tracker/devices', {'name': name});
+  Future<Map<String, dynamic>> createDevice(String name, {String? apiKey}) async {
+    final body = <String, dynamic>{'name': name};
+    if (apiKey != null) body['api_key'] = apiKey;
+    final res = await _api.post('/tracker/devices', body);
     final device = Device.fromJson(res['data'] as Map<String, dynamic>);
     _devices.insert(0, device);
     notifyListeners();
-    // Return full data including api_key (shown once)
     return res['data'] as Map<String, dynamic>;
   }
 

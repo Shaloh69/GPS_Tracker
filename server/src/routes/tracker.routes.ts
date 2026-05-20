@@ -19,6 +19,7 @@ router.post(
   '/devices',
   requireAuth,
   body('name').trim().notEmpty(),
+  body('api_key').optional().isHexadecimal().isLength({ min: 64, max: 64 }),
   createDevice
 );
 router.get('/devices', requireAuth, listDevices);

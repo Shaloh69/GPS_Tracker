@@ -8,6 +8,7 @@
 #include <TinyGPSPlus.h>
 #include <ArduinoJson.h>
 #include <HardwareSerial.h>
+#include "qrcode.h"
 
 // ── Pin config ────────────────────────────────────────────────────────────────
 #define GPS_RX_PIN       21
@@ -17,39 +18,35 @@
 #define POST_INTERVAL_MS 1000
 #define LED_PIN          2
 
-// ── Server (hardcoded) ────────────────────────────────────────────────────────
-#define SERVER_URL  "https://gps-tracker-xw5w.onrender.com/api/v1/tracker/location"
-#define PING_URL    "https://gps-tracker-xw5w.onrender.com/api/v1/tracker/ping"
+// ── Server ────────────────────────────────────────────────────────────────────
+#define SERVER_URL       "https://gps-tracker-xw5w.onrender.com/api/v1/tracker/location"
+#define PING_URL         "https://gps-tracker-xw5w.onrender.com/api/v1/tracker/ping"
 #define PING_INTERVAL_MS 10000
 
 // ── WiFi Manager config ───────────────────────────────────────────────────────
-#define AP_SSID               "GPS-Tracker-Setup"
-#define AP_PASS               ""
-#define WIFI_CONNECT_TIMEOUT  15000
-#define MAX_DEVICES           3
-#define FORCE_AP_PIN          0    // GPIO0 = BOOT button on ESP32 DevKit
+#define AP_SSID              "GPS-Tracker-Setup"
+#define AP_PASS              ""
+#define WIFI_CONNECT_TIMEOUT 15000
+#define FORCE_AP_PIN         0    // GPIO0 = BOOT button on ESP32 DevKit
 
 // ── App state ─────────────────────────────────────────────────────────────────
 enum AppState { SETUP_MODE, TRACKING_MODE };
 AppState appState = SETUP_MODE;
 
 // ── Services ──────────────────────────────────────────────────────────────────
-WebServer  webServer(80);
-DNSServer  dnsServer;
-Preferences prefs;
-TinyGPSPlus gps;
+WebServer      webServer(80);
+DNSServer      dnsServer;
+Preferences    prefs;
+TinyGPSPlus    gps;
 HardwareSerial gpsSerial(2);
 
-unsigned long lastPostMs  = 0;
-unsigned long lastPingMs  = 0;
-unsigned long bootHoldMs  = 0;   // BOOT button long-press tracker
+unsigned long lastPostMs = 0;
+unsigned long lastPingMs = 0;
+unsigned long bootHoldMs = 0;
 bool gpsReady = false;
 
-// Credentials loaded from NVS
-String savedSSID, savedPass;
-String devName[MAX_DEVICES];
-String devKey[MAX_DEVICES];
-int    activeDevice = 0;  // index 0–2
+// NVS state
+String savedSSID, savedPass, apiKey;
 
 // ── UBX GPS config commands ───────────────────────────────────────────────────
 static const uint8_t UBX_SET_BAUD_115200[] = {
@@ -69,30 +66,44 @@ static void sendUBX(HardwareSerial &s, const uint8_t *cmd, size_t len) {
   s.write(cmd, len); s.flush();
 }
 
+// ── API key generation (hardware RNG → 64-char lowercase hex) ─────────────────
+String generateApiKey() {
+  String key;
+  key.reserve(65);
+  for (int i = 0; i < 8; i++) {
+    char buf[9];
+    snprintf(buf, sizeof(buf), "%08x", (unsigned int)esp_random());
+    key += buf;
+  }
+  return key;
+}
+
 // ── NVS helpers ───────────────────────────────────────────────────────────────
 void loadPrefs() {
   prefs.begin("gps-tracker", true);
-  savedSSID    = prefs.getString("ssid", "");
-  savedPass    = prefs.getString("pass", "");
-  activeDevice = prefs.getInt("active_dev", 0);
-  for (int i = 0; i < MAX_DEVICES; i++) {
-    devName[i] = prefs.getString(("dev" + String(i) + "_name").c_str(), "");
-    devKey[i]  = prefs.getString(("dev" + String(i) + "_key").c_str(),  "");
-  }
+  savedSSID = prefs.getString("ssid",    "");
+  savedPass = prefs.getString("pass",    "");
+  apiKey    = prefs.getString("api_key", "");
   prefs.end();
+
+  if (apiKey.isEmpty()) {
+    apiKey = generateApiKey();
+    prefs.begin("gps-tracker", false);
+    prefs.putString("api_key", apiKey);
+    prefs.end();
+    Serial.printf("[APP] Generated new API key: %s\n", apiKey.c_str());
+  } else {
+    Serial.printf("[APP] Loaded API key: %s…\n", apiKey.substring(0, 8).c_str());
+  }
 }
 
-void savePrefs(const String &ssid, const String &pass, int activeDev,
-               String names[], String keys[]) {
+void savePrefs(const String &ssid, const String &pass) {
   prefs.begin("gps-tracker", false);
   prefs.putString("ssid", ssid);
   prefs.putString("pass", pass);
-  prefs.putInt("active_dev", activeDev);
-  for (int i = 0; i < MAX_DEVICES; i++) {
-    prefs.putString(("dev" + String(i) + "_name").c_str(), names[i]);
-    prefs.putString(("dev" + String(i) + "_key").c_str(),  keys[i]);
-  }
   prefs.end();
+  savedSSID = ssid;
+  savedPass = pass;
 }
 
 void clearPrefs() {
@@ -101,7 +112,7 @@ void clearPrefs() {
   prefs.end();
 }
 
-// ── Web page ──────────────────────────────────────────────────────────────────
+// ── HTML portal ───────────────────────────────────────────────────────────────
 const char HTML_PAGE[] PROGMEM = R"rawhtml(
 <!DOCTYPE html>
 <html lang="en">
@@ -110,241 +121,112 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>TraceX — Setup</title>
 <style>
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    background: #080F1E;
-    color: #E2E8F0;
-    min-height: 100vh;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    padding: 24px 16px 48px;
-  }
-
-  body::before, body::after {
-    content: '';
-    position: fixed;
-    border-radius: 50%;
-    pointer-events: none;
-    z-index: 0;
-  }
-  body::before {
-    width: 400px; height: 400px;
-    top: -120px; right: -100px;
-    background: radial-gradient(circle, rgba(99,102,241,.25) 0%, transparent 70%);
-  }
-  body::after {
-    width: 350px; height: 350px;
-    bottom: -60px; left: -80px;
-    background: radial-gradient(circle, rgba(6,182,212,.18) 0%, transparent 70%);
-  }
-
-  .wrap { width: 100%; max-width: 480px; position: relative; z-index: 1; }
-
-  .header { text-align: center; margin-bottom: 32px; }
-  .header .icon {
-    display: inline-flex; align-items: center; justify-content: center;
-    width: 64px; height: 64px; border-radius: 18px;
-    background: linear-gradient(135deg,#1E3A8A,#3B82F6);
-    font-size: 30px; margin-bottom: 12px;
-    box-shadow: 0 8px 24px rgba(59,130,246,.35);
-  }
-  .header h1 { font-size: 24px; font-weight: 700; color: #fff; }
-  .header p  { font-size: 14px; color: #94A3B8; margin-top: 4px; }
-
-  .server-badge {
-    display: inline-flex; align-items: center; gap: 6px;
-    background: rgba(34,197,94,.1); border: 1px solid rgba(34,197,94,.25);
-    color: #4ADE80; font-size: 11px; font-family: monospace;
-    padding: 5px 12px; border-radius: 50px; margin-top: 10px;
-  }
-  .server-badge .dot-green {
-    width: 7px; height: 7px; border-radius: 50%; background: #22C55E;
-    box-shadow: 0 0 6px rgba(34,197,94,.5);
-  }
-
-  .card {
-    background: rgba(13,23,48,.85);
-    border: 1px solid rgba(255,255,255,.1);
-    border-radius: 20px;
-    padding: 24px;
-    margin-bottom: 16px;
-    backdrop-filter: blur(12px);
-  }
-  .card-title {
-    font-size: 13px; font-weight: 700; letter-spacing: .06em;
-    color: #60A5FA; text-transform: uppercase; margin-bottom: 16px;
-    display: flex; align-items: center; gap: 8px;
-  }
-
-  .btn-scan {
-    display: flex; align-items: center; justify-content: center; gap: 8px;
-    width: 100%; padding: 11px; border-radius: 12px; border: none; cursor: pointer;
-    background: rgba(59,130,246,.15); color: #60A5FA;
-    font-size: 14px; font-weight: 600; transition: all .2s;
-    border: 1px solid rgba(59,130,246,.3);
-  }
-  .btn-scan:hover  { background: rgba(59,130,246,.25); }
-  .btn-scan.spinning .scan-icon { animation: spin 1s linear infinite; }
-  @keyframes spin { to { transform: rotate(360deg); } }
-
-  .net-list { margin-top: 14px; display: flex; flex-direction: column; gap: 8px; }
-  .net-item {
-    display: flex; align-items: center; gap: 12px;
-    padding: 12px 14px; border-radius: 12px; cursor: pointer;
-    background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.07);
-    transition: all .15s;
-  }
-  .net-item:hover  { background: rgba(59,130,246,.12); border-color: rgba(59,130,246,.35); }
-  .net-item.active { background: rgba(59,130,246,.18); border-color: #3B82F6; }
-
-  .bars { display: flex; align-items: flex-end; gap: 2px; height: 18px; }
-  .bars span { width: 4px; border-radius: 2px; background: #1E40AF; transition: background .15s; }
-  .bars span.lit  { background: #3B82F6; }
-  .net-item.active .bars span.lit { background: #60A5FA; }
-
-  .net-name { flex: 1; font-size: 14px; font-weight: 500; color: #E2E8F0; }
-  .net-rssi { font-size: 11px; color: #64748B; }
-  .lock { font-size: 13px; color: #475569; }
-
-  .field { margin-bottom: 14px; }
-  label { display: block; font-size: 12px; font-weight: 600; color: #94A3B8; margin-bottom: 6px; }
-  .input-wrap { position: relative; }
-  input[type=text], input[type=password] {
-    width: 100%; padding: 11px 14px; border-radius: 12px;
-    background: rgba(21,34,64,.9); border: 1px solid rgba(255,255,255,.1);
-    color: #fff; font-size: 14px; outline: none; transition: border-color .2s;
-  }
-  input:focus { border-color: #3B82F6; box-shadow: 0 0 0 3px rgba(59,130,246,.15); }
-  .eye {
-    position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
-    cursor: pointer; color: #64748B; font-size: 16px; user-select: none;
-    transition: color .2s;
-  }
-  .eye:hover { color: #94A3B8; }
-
-  /* Device slots */
-  .device-slot {
-    border: 1px solid rgba(255,255,255,.08);
-    border-radius: 14px;
-    padding: 16px;
-    margin-bottom: 12px;
-    background: rgba(255,255,255,.02);
-    transition: border-color .2s, background .2s;
-  }
-  .device-slot.active-slot {
-    border-color: #3B82F6;
-    background: rgba(59,130,246,.06);
-  }
-  .slot-header {
-    display: flex; align-items: center; justify-content: space-between;
-    margin-bottom: 12px;
-  }
-  .slot-label {
-    font-size: 12px; font-weight: 700; color: #60A5FA; text-transform: uppercase; letter-spacing: .05em;
-    display: flex; align-items: center; gap: 6px;
-  }
-  .active-badge {
-    display: none; background: rgba(34,197,94,.15); border: 1px solid rgba(34,197,94,.3);
-    color: #4ADE80; font-size: 10px; font-weight: 700; padding: 2px 8px;
-    border-radius: 50px; letter-spacing: .04em;
-  }
-  .device-slot.active-slot .active-badge { display: inline-block; }
-  .btn-activate {
-    padding: 5px 12px; border-radius: 8px; border: 1px solid rgba(59,130,246,.4);
-    background: rgba(59,130,246,.12); color: #60A5FA; font-size: 11px; font-weight: 600;
-    cursor: pointer; transition: all .2s;
-  }
-  .btn-activate:hover { background: rgba(59,130,246,.25); }
-  .device-slot.active-slot .btn-activate { display: none; }
-
-  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-
-  .btn-connect {
-    width: 100%; padding: 14px; border-radius: 14px; border: none; cursor: pointer;
-    background: linear-gradient(135deg,#1D4ED8,#3B82F6);
-    color: #fff; font-size: 15px; font-weight: 700; margin-top: 8px;
-    transition: all .2s; box-shadow: 0 4px 16px rgba(59,130,246,.3);
-    display: flex; align-items: center; justify-content: center; gap: 8px;
-  }
-  .btn-connect:hover  { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(59,130,246,.4); }
-  .btn-connect:active { transform: translateY(0); }
-  .btn-connect:disabled { opacity: .5; cursor: not-allowed; transform: none; }
-
-  .status-row {
-    display: flex; align-items: center; gap: 10px;
-    padding: 12px 14px; border-radius: 12px;
-    background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.07);
-    margin-bottom: 10px; font-size: 13px;
-  }
-  .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; background: #475569; }
-  .dot.green { background: #22C55E; box-shadow: 0 0 8px rgba(34,197,94,.5); }
-  .dot.blue  { background: #3B82F6; animation: pulse 1.4s ease-in-out infinite; }
-  .dot.red   { background: #EF4444; }
-  @keyframes pulse {
-    0%,100% { box-shadow: 0 0 0 0 rgba(59,130,246,.5); }
-    50%      { box-shadow: 0 0 0 5px rgba(59,130,246,0); }
-  }
-  .status-text { flex: 1; color: #CBD5E1; }
-  .status-ip   { font-size: 12px; color: #60A5FA; font-family: monospace; }
-
-  #toast {
-    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(80px);
-    background: rgba(13,23,48,.95); border: 1px solid rgba(255,255,255,.12);
-    color: #E2E8F0; padding: 10px 20px; border-radius: 50px;
-    font-size: 13px; font-weight: 500; transition: transform .3s ease;
-    pointer-events: none; z-index: 99; white-space: nowrap;
-    box-shadow: 0 8px 24px rgba(0,0,0,.4);
-  }
-  #toast.show { transform: translateX(-50%) translateY(0); }
-  #toast.ok   { border-color: rgba(34,197,94,.4); }
-  #toast.err  { border-color: rgba(239,68,68,.4); }
-
-  .divider { height: 1px; background: rgba(255,255,255,.07); margin: 20px 0; }
-  .reset-link {
-    text-align: center; font-size: 12px; color: #475569; cursor: pointer;
-    text-decoration: underline; text-underline-offset: 3px;
-  }
-  .reset-link:hover { color: #EF4444; }
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#080F1E;color:#E2E8F0;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:24px 16px 48px}
+  body::before,body::after{content:'';position:fixed;border-radius:50%;pointer-events:none;z-index:0}
+  body::before{width:400px;height:400px;top:-120px;right:-100px;background:radial-gradient(circle,rgba(99,102,241,.25) 0%,transparent 70%)}
+  body::after{width:350px;height:350px;bottom:-60px;left:-80px;background:radial-gradient(circle,rgba(6,182,212,.18) 0%,transparent 70%)}
+  .wrap{width:100%;max-width:480px;position:relative;z-index:1}
+  .header{text-align:center;margin-bottom:32px}
+  .header .icon{display:inline-flex;align-items:center;justify-content:center;width:64px;height:64px;border-radius:18px;background:linear-gradient(135deg,#1E3A8A,#3B82F6);font-size:30px;margin-bottom:12px;box-shadow:0 8px 24px rgba(59,130,246,.35)}
+  .header h1{font-size:24px;font-weight:700;color:#fff}
+  .header p{font-size:14px;color:#94A3B8;margin-top:4px}
+  .server-badge{display:inline-flex;align-items:center;gap:6px;background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.25);color:#4ADE80;font-size:11px;font-family:monospace;padding:5px 12px;border-radius:50px;margin-top:10px}
+  .dot-green{width:7px;height:7px;border-radius:50%;background:#22C55E;box-shadow:0 0 6px rgba(34,197,94,.5)}
+  .card{background:rgba(13,23,48,.85);border:1px solid rgba(255,255,255,.1);border-radius:20px;padding:24px;margin-bottom:16px;backdrop-filter:blur(12px)}
+  .card-title{font-size:13px;font-weight:700;letter-spacing:.06em;color:#60A5FA;text-transform:uppercase;margin-bottom:16px;display:flex;align-items:center;gap:8px}
+  .btn-scan{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;padding:11px;border-radius:12px;border:1px solid rgba(59,130,246,.3);cursor:pointer;background:rgba(59,130,246,.15);color:#60A5FA;font-size:14px;font-weight:600;transition:all .2s}
+  .btn-scan:hover{background:rgba(59,130,246,.25)}
+  .btn-scan.spinning .scan-icon{animation:spin 1s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .net-list{margin-top:14px;display:flex;flex-direction:column;gap:8px}
+  .net-item{display:flex;align-items:center;gap:12px;padding:12px 14px;border-radius:12px;cursor:pointer;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.07);transition:all .15s}
+  .net-item:hover{background:rgba(59,130,246,.12);border-color:rgba(59,130,246,.35)}
+  .net-item.active{background:rgba(59,130,246,.18);border-color:#3B82F6}
+  .bars{display:flex;align-items:flex-end;gap:2px;height:18px}
+  .bars span{width:4px;border-radius:2px;background:#1E40AF;transition:background .15s}
+  .bars span.lit{background:#3B82F6}
+  .net-item.active .bars span.lit{background:#60A5FA}
+  .net-name{flex:1;font-size:14px;font-weight:500;color:#E2E8F0}
+  .net-rssi{font-size:11px;color:#64748B}
+  .lock{font-size:13px;color:#475569}
+  .field{margin-bottom:14px}
+  label{display:block;font-size:12px;font-weight:600;color:#94A3B8;margin-bottom:6px}
+  .input-wrap{position:relative}
+  input[type=text],input[type=password]{width:100%;padding:11px 14px;border-radius:12px;background:rgba(21,34,64,.9);border:1px solid rgba(255,255,255,.1);color:#fff;font-size:14px;outline:none;transition:border-color .2s}
+  input:focus{border-color:#3B82F6;box-shadow:0 0 0 3px rgba(59,130,246,.15)}
+  .eye{position:absolute;right:12px;top:50%;transform:translateY(-50%);cursor:pointer;color:#64748B;font-size:16px;user-select:none;transition:color .2s}
+  .eye:hover{color:#94A3B8}
+  .btn-connect{width:100%;padding:14px;border-radius:14px;border:none;cursor:pointer;background:linear-gradient(135deg,#1D4ED8,#3B82F6);color:#fff;font-size:15px;font-weight:700;margin-top:8px;transition:all .2s;box-shadow:0 4px 16px rgba(59,130,246,.3);display:flex;align-items:center;justify-content:center;gap:8px}
+  .btn-connect:hover{transform:translateY(-1px);box-shadow:0 6px 20px rgba(59,130,246,.4)}
+  .btn-connect:active{transform:translateY(0)}
+  .btn-connect:disabled{opacity:.5;cursor:not-allowed;transform:none}
+  .status-row{display:flex;align-items:center;gap:10px;padding:12px 14px;border-radius:12px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.07);margin-bottom:10px;font-size:13px}
+  .dot{width:9px;height:9px;border-radius:50%;flex-shrink:0;background:#475569}
+  .dot.green{background:#22C55E;box-shadow:0 0 8px rgba(34,197,94,.5)}
+  .dot.blue{background:#3B82F6;animation:pulse 1.4s ease-in-out infinite}
+  .dot.red{background:#EF4444}
+  @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(59,130,246,.5)}50%{box-shadow:0 0 0 5px rgba(59,130,246,0)}}
+  .status-text{flex:1;color:#CBD5E1}
+  .status-ip{font-size:12px;color:#60A5FA;font-family:monospace}
+  .qr-wrap{text-align:center}
+  .qr-frame{display:inline-block;background:#fff;padding:14px;border-radius:14px;margin-bottom:14px;box-shadow:0 4px 20px rgba(0,0,0,.4)}
+  .qr-hint{font-size:13px;color:#94A3B8;margin-bottom:14px;line-height:1.6}
+  .qr-hint strong{color:#60A5FA}
+  .key-box{background:rgba(21,34,64,.9);border:1px solid rgba(255,255,255,.1);border-radius:10px;padding:10px 14px;text-align:left;margin-bottom:12px}
+  .key-label{display:block;font-size:10px;font-weight:700;color:#60A5FA;letter-spacing:.08em;margin-bottom:4px}
+  .key-val{font-family:monospace;font-size:11px;color:#94A3B8;word-break:break-all}
+  .btn-dl{width:100%;padding:10px;border-radius:12px;border:1px solid rgba(245,158,11,.35);background:rgba(245,158,11,.1);color:#F59E0B;font-size:13px;font-weight:600;cursor:pointer;transition:all .2s}
+  .btn-dl:hover{background:rgba(245,158,11,.2)}
+  .modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:200;align-items:center;justify-content:center;padding:20px}
+  .modal-overlay.show{display:flex}
+  .modal-box{background:#0D1730;border:1px solid rgba(255,255,255,.15);border-radius:20px;padding:24px;max-width:340px;width:100%}
+  .modal-icon{font-size:36px;text-align:center;margin-bottom:12px}
+  .modal-title{color:#fff;font-size:17px;font-weight:700;text-align:center;margin-bottom:8px}
+  .modal-body{color:#94A3B8;font-size:13px;line-height:1.65;text-align:center;margin-bottom:20px}
+  .modal-body strong{color:#F59E0B}
+  .modal-row{display:flex;gap:10px}
+  .btn-cancel{flex:1;padding:11px;border-radius:12px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.05);color:#94A3B8;font-size:14px;cursor:pointer}
+  .btn-dl-confirm{flex:1;padding:11px;border-radius:12px;border:none;background:linear-gradient(135deg,#92400E,#F59E0B);color:#fff;font-size:14px;font-weight:600;cursor:pointer;text-decoration:none;text-align:center;display:flex;align-items:center;justify-content:center;gap:6px}
+  #toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(80px);background:rgba(13,23,48,.95);border:1px solid rgba(255,255,255,.12);color:#E2E8F0;padding:10px 20px;border-radius:50px;font-size:13px;font-weight:500;transition:transform .3s ease;pointer-events:none;z-index:99;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,.4)}
+  #toast.show{transform:translateX(-50%) translateY(0)}
+  #toast.ok{border-color:rgba(34,197,94,.4)}
+  #toast.err{border-color:rgba(239,68,68,.4)}
+  .reset-link{text-align:center;font-size:12px;color:#475569;cursor:pointer;text-decoration:underline;text-underline-offset:3px}
+  .reset-link:hover{color:#EF4444}
 </style>
 </head>
 <body>
 <div class="wrap">
-
   <div class="header">
-    <div class="icon">📍</div>
+    <div class="icon">&#128205;</div>
     <h1>TraceX</h1>
-    <p>Wi-Fi &amp; Device Configuration</p>
+    <p>Wi-Fi Configuration &amp; Device Pairing</p>
     <div class="server-badge">
       <div class="dot-green"></div>
       gps-tracker-xw5w.onrender.com
     </div>
   </div>
 
-  <!-- Status -->
   <div class="card">
-    <div class="card-title">⚡ Current Status</div>
+    <div class="card-title">&#9889; Current Status</div>
     <div id="statusRow" class="status-row">
       <div id="dot" class="dot"></div>
-      <span id="statusText" class="status-text">Checking…</span>
+      <span id="statusText" class="status-text">Checking...</span>
       <span id="statusIp" class="status-ip"></span>
     </div>
   </div>
 
-  <!-- Wi-Fi -->
   <div class="card">
-    <div class="card-title">📶 Wi-Fi Networks</div>
+    <div class="card-title">&#128246; Wi-Fi Networks</div>
     <button class="btn-scan" id="scanBtn" onclick="scanNetworks()">
-      <span class="scan-icon">⟳</span> Scan for Networks
+      <span class="scan-icon">&#x27F3;</span> Scan for Networks
     </button>
     <div class="net-list" id="netList"></div>
   </div>
 
-  <!-- Credentials -->
   <div class="card">
-    <div class="card-title">🔐 Wi-Fi Credentials</div>
+    <div class="card-title">&#128272; Wi-Fi Credentials</div>
     <div class="field">
       <label>Wi-Fi Network (SSID)</label>
       <input type="text" id="ssid" placeholder="Select from scan or type manually">
@@ -353,250 +235,127 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
       <label>Wi-Fi Password</label>
       <div class="input-wrap">
         <input type="password" id="pass" placeholder="Password">
-        <span class="eye" onclick="toggleField('pass')">👁</span>
+        <span class="eye" onclick="toggleField('pass')">&#128065;</span>
       </div>
+    </div>
+    <button class="btn-connect" id="connectBtn" onclick="saveAndConnect()">
+      &#128279; Save &amp; Connect
+    </button>
+  </div>
+
+  <div class="card">
+    <div class="card-title">&#128241; Pair with TraceX App</div>
+    <div class="qr-wrap">
+      <div class="qr-frame">
+        <img src="/qr.svg" id="qrImg" alt="API Key QR Code" width="216" height="216">
+      </div>
+      <p class="qr-hint">Open <strong>TraceX</strong> app &#8594; <em>Add Device</em> &#8594; Scan this QR code to pair</p>
+      <div class="key-box">
+        <span class="key-label">API KEY</span>
+        <code id="apiKeyText" class="key-val">Loading...</code>
+      </div>
+      <button class="btn-dl" onclick="showDlModal()">&#11015; Download QR Code</button>
     </div>
   </div>
 
-  <!-- Devices -->
-  <div class="card">
-    <div class="card-title">🛰 Devices <span style="color:#475569;font-size:11px;font-weight:500;text-transform:none;letter-spacing:0">Add device in TraceX app first, then paste key below</span></div>
-
-    <div id="slot0" class="device-slot">
-      <div class="slot-header">
-        <div class="slot-label">Device 1 <span class="active-badge">ACTIVE</span></div>
-        <button class="btn-activate" onclick="setActive(0)">Activate</button>
+  <!-- Download warning modal -->
+  <div class="modal-overlay" id="dlModal">
+    <div class="modal-box">
+      <div class="modal-icon">&#9888;</div>
+      <div class="modal-title">Download QR Code</div>
+      <div class="modal-body">
+        <strong>Be careful!</strong> If you lose this QR code, a full ESP32 reset is required &#8212; the device will forget its Wi-Fi credentials and generate a brand-new key, requiring re-pairing from scratch.
       </div>
-      <div class="field" style="margin-bottom:10px">
-        <label>Device Name</label>
-        <input type="text" id="dev0name" placeholder="e.g. Tracker-01">
-      </div>
-      <div class="field" style="margin-bottom:0">
-        <label>API Key</label>
-        <div class="input-wrap">
-          <input type="password" id="dev0key" placeholder="TraceX app → Add Device → copy key here">
-          <span class="eye" onclick="toggleField('dev0key')">👁</span>
-        </div>
+      <div class="modal-row">
+        <button class="btn-cancel" onclick="closeDlModal()">Cancel</button>
+        <a id="dlLink" href="/qr.svg" download="tracex-device-qr.svg" class="btn-dl-confirm" onclick="closeDlModal()">&#11015; Download</a>
       </div>
     </div>
-
-    <div id="slot1" class="device-slot">
-      <div class="slot-header">
-        <div class="slot-label">Device 2 <span class="active-badge">ACTIVE</span></div>
-        <button class="btn-activate" onclick="setActive(1)">Activate</button>
-      </div>
-      <div class="field" style="margin-bottom:10px">
-        <label>Device Name</label>
-        <input type="text" id="dev1name" placeholder="e.g. Tracker-02">
-      </div>
-      <div class="field" style="margin-bottom:0">
-        <label>API Key</label>
-        <div class="input-wrap">
-          <input type="password" id="dev1key" placeholder="TraceX app → Add Device → copy key here">
-          <span class="eye" onclick="toggleField('dev1key')">👁</span>
-        </div>
-      </div>
-    </div>
-
-    <div id="slot2" class="device-slot">
-      <div class="slot-header">
-        <div class="slot-label">Device 3 <span class="active-badge">ACTIVE</span></div>
-        <button class="btn-activate" onclick="setActive(2)">Activate</button>
-      </div>
-      <div class="field" style="margin-bottom:10px">
-        <label>Device Name</label>
-        <input type="text" id="dev2name" placeholder="e.g. Tracker-03">
-      </div>
-      <div class="field" style="margin-bottom:0">
-        <label>API Key</label>
-        <div class="input-wrap">
-          <input type="password" id="dev2key" placeholder="TraceX app → Add Device → copy key here">
-          <span class="eye" onclick="toggleField('dev2key')">👁</span>
-        </div>
-      </div>
-    </div>
-
-    <button class="btn-connect" id="connectBtn" onclick="saveAndConnect()">
-      🔗 Save &amp; Connect
-    </button>
   </div>
 
   <div class="reset-link" onclick="resetDevice()">Reset all saved credentials</div>
 </div>
-
 <div id="toast"></div>
 
 <script>
-  let selectedSSID  = '';
-  let activeSlot    = 0;
-
-  function setActive(idx) {
-    activeSlot = idx;
-    for (let i = 0; i < 3; i++) {
-      document.getElementById('slot' + i).classList.toggle('active-slot', i === idx);
+  var selectedSSID='';
+  async function pollStatus(){
+    try{
+      var r=await fetch('/status'),d=await r.json();
+      var dot=document.getElementById('dot'),txt=document.getElementById('statusText'),ip=document.getElementById('statusIp');
+      if(d.connected){dot.className='dot green';txt.textContent='Connected to '+d.ssid;ip.textContent=d.ip;}
+      else{dot.className='dot red';txt.textContent='Not connected';ip.textContent='';}
+    }catch(_){
+      document.getElementById('dot').className='dot red';
+      document.getElementById('statusText').textContent='Setup mode (AP)';
+      document.getElementById('statusIp').textContent='192.168.4.1';
     }
   }
-
-  async function pollStatus() {
-    try {
-      const r = await fetch('/status');
-      const d = await r.json();
-      const dot = document.getElementById('dot');
-      const txt = document.getElementById('statusText');
-      const ip  = document.getElementById('statusIp');
-      if (d.connected) {
-        dot.className   = 'dot green';
-        txt.textContent = 'Connected to ' + d.ssid;
-        ip.textContent  = d.ip;
-      } else {
-        dot.className   = 'dot red';
-        txt.textContent = 'Not connected';
-        ip.textContent  = '';
-      }
-    } catch (_) {
-      document.getElementById('dot').className        = 'dot red';
-      document.getElementById('statusText').textContent = 'Setup mode (AP)';
-      document.getElementById('statusIp').textContent  = '192.168.4.1';
-    }
-  }
-
-  async function scanNetworks() {
-    const btn  = document.getElementById('scanBtn');
-    const list = document.getElementById('netList');
-    btn.classList.add('spinning');
-    btn.disabled = true;
-    list.innerHTML = '<div style="text-align:center;color:#64748B;padding:12px;font-size:13px">Scanning…</div>';
-    try {
-      const r    = await fetch('/scan');
-      const nets = await r.json();
-      list.innerHTML = '';
-      if (!nets.length) {
-        list.innerHTML = '<div style="text-align:center;color:#64748B;padding:12px;font-size:13px">No networks found</div>';
-        return;
-      }
-      nets.forEach(n => {
-        const el = document.createElement('div');
-        el.className = 'net-item' + (n.ssid === selectedSSID ? ' active' : '');
-        el.innerHTML =
-          '<div class="bars">' + signalBars(n.rssi) + '</div>' +
-          '<span class="net-name">' + esc(n.ssid) + '</span>' +
-          '<span class="net-rssi">' + n.rssi + ' dBm</span>' +
-          (n.encrypted ? '<span class="lock">🔒</span>' : '<span class="lock" style="color:#22C55E">🔓</span>');
-        el.onclick = () => selectNetwork(n.ssid, el);
+  async function scanNetworks(){
+    var btn=document.getElementById('scanBtn'),list=document.getElementById('netList');
+    btn.classList.add('spinning');btn.disabled=true;
+    list.innerHTML='<div style="text-align:center;color:#64748B;padding:12px;font-size:13px">Scanning...</div>';
+    try{
+      var r=await fetch('/scan'),nets=await r.json();
+      list.innerHTML='';
+      if(!nets.length){list.innerHTML='<div style="text-align:center;color:#64748B;padding:12px;font-size:13px">No networks found</div>';return;}
+      nets.forEach(function(n){
+        var el=document.createElement('div');
+        el.className='net-item'+(n.ssid===selectedSSID?' active':'');
+        el.innerHTML='<div class="bars">'+signalBars(n.rssi)+'</div><span class="net-name">'+esc(n.ssid)+'</span><span class="net-rssi">'+n.rssi+' dBm</span>'+(n.encrypted?'<span class="lock">&#128274;</span>':'<span class="lock" style="color:#22C55E">&#128275;</span>');
+        el.onclick=function(){selectNetwork(n.ssid,el);};
         list.appendChild(el);
       });
-    } catch(e) {
-      list.innerHTML = '<div style="text-align:center;color:#EF4444;padding:12px;font-size:13px">Scan failed — retry</div>';
-    } finally {
-      btn.classList.remove('spinning');
-      btn.disabled = false;
-    }
+    }catch(e){list.innerHTML='<div style="text-align:center;color:#EF4444;padding:12px;font-size:13px">Scan failed - retry</div>';}
+    finally{btn.classList.remove('spinning');btn.disabled=false;}
   }
-
-  function signalBars(rssi) {
-    const strength = rssi >= -55 ? 4 : rssi >= -65 ? 3 : rssi >= -75 ? 2 : 1;
-    const heights  = ['6px','10px','14px','18px'];
-    return heights.map((h,i) =>
-      `<span style="height:${h}" class="${i < strength ? 'lit' : ''}"></span>`
-    ).join('');
+  function signalBars(rssi){
+    var s=rssi>=-55?4:rssi>=-65?3:rssi>=-75?2:1,h=['6px','10px','14px','18px'];
+    return h.map(function(v,i){return '<span style="height:'+v+'" class="'+(i<s?'lit':'')+'"></span>';}).join('');
   }
-
-  function selectNetwork(ssid, el) {
-    selectedSSID = ssid;
-    document.getElementById('ssid').value = ssid;
-    document.querySelectorAll('.net-item').forEach(e => e.classList.remove('active'));
-    el.classList.add('active');
-    document.getElementById('pass').focus();
+  function selectNetwork(ssid,el){
+    selectedSSID=ssid;document.getElementById('ssid').value=ssid;
+    document.querySelectorAll('.net-item').forEach(function(e){e.classList.remove('active');});
+    el.classList.add('active');document.getElementById('pass').focus();
   }
-
-  async function saveAndConnect() {
-    const ssid = document.getElementById('ssid').value.trim();
-    const pass = document.getElementById('pass').value;
-
-    if (!ssid) { toast('Enter a Wi-Fi network name', 'err'); return; }
-
-    // Collect all 3 device slots
-    const devices = [];
-    for (let i = 0; i < 3; i++) {
-      devices.push({
-        name: document.getElementById('dev' + i + 'name').value.trim(),
-        key:  document.getElementById('dev' + i + 'key').value.trim()
-      });
-    }
-
-    // Active slot must have a key
-    if (!devices[activeSlot].key) {
-      toast('Active device (Device ' + (activeSlot+1) + ') needs an API key', 'err');
-      return;
-    }
-
-    const btn = document.getElementById('connectBtn');
-    btn.disabled    = true;
-    btn.textContent = '⏳ Saving…';
-
-    try {
-      const r = await fetch('/save', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ssid, pass, active_dev: activeSlot, devices })
-      });
-      if (r.ok) {
-        toast('Saved! Connecting to ' + ssid + '…', 'ok');
-        document.getElementById('dot').className        = 'dot blue';
-        document.getElementById('statusText').textContent = 'Connecting to ' + ssid + '…';
-        setTimeout(pollStatus, 3000);
-        setTimeout(pollStatus, 7000);
-        setTimeout(pollStatus, 12000);
-      } else {
-        toast('Save failed — try again', 'err');
-      }
-    } catch(_) {
-      toast('Save failed — try again', 'err');
-    } finally {
-      btn.disabled    = false;
-      btn.textContent = '🔗 Save & Connect';
-    }
+  async function saveAndConnect(){
+    var ssid=document.getElementById('ssid').value.trim(),pass=document.getElementById('pass').value;
+    if(!ssid){toast('Enter a Wi-Fi network name','err');return;}
+    var btn=document.getElementById('connectBtn');
+    btn.disabled=true;btn.textContent='Saving...';
+    try{
+      var r=await fetch('/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid:ssid,pass:pass})});
+      if(r.ok){
+        toast('Saved! Connecting to '+ssid+'...','ok');
+        document.getElementById('dot').className='dot blue';
+        document.getElementById('statusText').textContent='Connecting to '+ssid+'...';
+        setTimeout(pollStatus,3000);setTimeout(pollStatus,7000);setTimeout(pollStatus,12000);
+      }else{toast('Save failed - try again','err');}
+    }catch(_){toast('Save failed - try again','err');}
+    finally{btn.disabled=false;btn.textContent='🔗 Save & Connect';}
   }
-
-  async function resetDevice() {
-    if (!confirm('Clear all saved credentials? The device will restart in setup mode.')) return;
-    await fetch('/reset', { method: 'POST' }).catch(() => {});
-    toast('Credentials cleared — reconnecting to GPS-Tracker-Setup…', 'ok');
-    setTimeout(() => location.reload(), 3000);
+  async function resetDevice(){
+    if(!confirm('Clear all saved credentials? The device will restart in setup mode.'))return;
+    await fetch('/reset',{method:'POST'}).catch(function(){});
+    toast('Credentials cleared - reconnecting to GPS-Tracker-Setup...','ok');
+    setTimeout(function(){location.reload();},3000);
   }
-
-  function toggleField(id) {
-    const f = document.getElementById(id);
-    f.type = f.type === 'password' ? 'text' : 'password';
+  function toggleField(id){var f=document.getElementById(id);f.type=f.type==='password'?'text':'password';}
+  function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+  function showDlModal(){document.getElementById('dlModal').classList.add('show');}
+  function closeDlModal(){document.getElementById('dlModal').classList.remove('show');}
+  var toastTimer;
+  function toast(msg,type){
+    var el=document.getElementById('toast');el.textContent=msg;el.className='show '+(type||'');
+    clearTimeout(toastTimer);toastTimer=setTimeout(function(){el.className='';},3500);
   }
-
-  function esc(s) {
-    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  }
-
-  let toastTimer;
-  function toast(msg, type) {
-    const el = document.getElementById('toast');
-    el.textContent = msg;
-    el.className   = 'show ' + (type || '');
-    clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => el.className = '', 3500);
-  }
-
-  (async () => {
+  (async function(){
     await pollStatus();
-    try {
-      const r = await fetch('/config');
-      const d = await r.json();
-      if (d.ssid) { document.getElementById('ssid').value = d.ssid; selectedSSID = d.ssid; }
-      for (let i = 0; i < 3; i++) {
-        if (d.devices && d.devices[i]) {
-          document.getElementById('dev' + i + 'name').value = d.devices[i].name || '';
-          document.getElementById('dev' + i + 'key').value  = d.devices[i].key  || '';
-        }
-      }
-      setActive(d.active_dev || 0);
-    } catch(_) { setActive(0); }
+    try{
+      var r=await fetch('/config'),d=await r.json();
+      if(d.ssid){document.getElementById('ssid').value=d.ssid;selectedSSID=d.ssid;}
+      if(d.api_key){document.getElementById('apiKeyText').textContent=d.api_key;}
+    }catch(_){}
     await scanNetworks();
   })();
 </script>
@@ -604,8 +363,55 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
 </html>
 )rawhtml";
 
-// ── Web server handlers ───────────────────────────────────────────────────────
+// ── QR code SVG (served from /qr.svg) ────────────────────────────────────────
+// Uses QR version 5 (37x37 matrix) with ECC_LOW — handles 64-byte hex key
+void handleQRSvg() {
+  const uint8_t version    = 5;
+  const int     moduleSize = 6;
+  const int     quietZone  = 4;
 
+  uint8_t qrcodeData[qrcode_getBufferSize(version)];
+  QRCode  qrcode;
+  if (qrcode_initText(&qrcode, qrcodeData, version, ECC_LOW, apiKey.c_str()) != 0) {
+    webServer.send(500, "text/plain", "QR generation failed");
+    return;
+  }
+
+  int svgPx = (qrcode.size + 2 * quietZone) * moduleSize;
+
+  webServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  webServer.send(200, "image/svg+xml", "");
+
+  // Header
+  String h;
+  h.reserve(200);
+  h  = F("<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"");
+  h += svgPx; h += F("\" height=\""); h += svgPx;
+  h += F("\" viewBox=\"0 0 "); h += svgPx; h += ' '; h += svgPx; h += F("\">");
+  h += F("<rect width=\"100%\" height=\"100%\" fill=\"#fff\"/><g fill=\"#000\">");
+  webServer.sendContent(h);
+
+  // One chunk per row
+  for (uint8_t y = 0; y < qrcode.size; y++) {
+    String row;
+    row.reserve(qrcode.size * 28);
+    for (uint8_t x = 0; x < qrcode.size; x++) {
+      if (qrcode_getModule(&qrcode, x, y)) {
+        row += F("<rect x=\"");
+        row += (int)((x + quietZone) * moduleSize);
+        row += F("\" y=\"");
+        row += (int)((y + quietZone) * moduleSize);
+        row += F("\" width=\"6\" height=\"6\"/>");
+      }
+    }
+    if (row.length()) webServer.sendContent(row);
+  }
+
+  webServer.sendContent(F("</g></svg>"));
+  webServer.sendContent("");  // end chunked
+}
+
+// ── Web server handlers ───────────────────────────────────────────────────────
 void handleRoot() {
   webServer.send_P(200, "text/html", HTML_PAGE);
 }
@@ -636,16 +442,9 @@ void handleStatus() {
 }
 
 void handleConfig() {
-  loadPrefs();
   JsonDocument doc;
-  doc["ssid"]       = savedSSID;
-  doc["active_dev"] = activeDevice;
-  JsonArray devArr  = doc["devices"].to<JsonArray>();
-  for (int i = 0; i < MAX_DEVICES; i++) {
-    JsonObject o = devArr.add<JsonObject>();
-    o["name"] = devName[i];
-    o["key"]  = devKey[i];
-  }
+  doc["ssid"]    = savedSSID;
+  doc["api_key"] = apiKey;
   String out;
   serializeJson(doc, out);
   webServer.send(200, "application/json", out);
@@ -664,25 +463,16 @@ void handleSave() {
 
   String ssid = doc["ssid"].as<String>();
   String pass = doc["pass"].as<String>();
-  int    act  = doc["active_dev"] | 0;
-  if (act < 0 || act >= MAX_DEVICES) act = 0;
 
-  String names[MAX_DEVICES], keys[MAX_DEVICES];
-  JsonArray devArr = doc["devices"].as<JsonArray>();
-  for (int i = 0; i < MAX_DEVICES; i++) {
-    names[i] = devArr[i]["name"].as<String>();
-    keys[i]  = devArr[i]["key"].as<String>();
-  }
-
-  if (!ssid.length() || !keys[act].length()) {
-    webServer.send(400, "application/json", "{\"error\":\"ssid and active device key required\"}");
+  if (!ssid.length()) {
+    webServer.send(400, "application/json", "{\"error\":\"ssid required\"}");
     return;
   }
 
-  savePrefs(ssid, pass, act, names, keys);
+  savePrefs(ssid, pass);
   webServer.send(200, "application/json", "{\"ok\":true}");
 
-  Serial.printf("[WiFi] Trying saved credentials: %s\n", ssid.c_str());
+  Serial.printf("[WiFi] Trying: %s\n", ssid.c_str());
   WiFi.begin(ssid.c_str(), pass.c_str());
 }
 
@@ -698,6 +488,7 @@ void handleCaptive() {
   webServer.send(302, "text/plain", "");
 }
 
+// ── Access-point + web server startup ────────────────────────────────────────
 void startAP() {
   WiFi.disconnect(true);
   WiFi.mode(WIFI_AP_STA);
@@ -712,12 +503,13 @@ void startAP() {
   webServer.on("/scan",   HTTP_GET,  handleScan);
   webServer.on("/status", HTTP_GET,  handleStatus);
   webServer.on("/config", HTTP_GET,  handleConfig);
+  webServer.on("/qr.svg", HTTP_GET,  handleQRSvg);
   webServer.on("/save",   HTTP_POST, handleSave);
   webServer.on("/reset",  HTTP_POST, handleReset);
   webServer.onNotFound(handleCaptive);
   webServer.begin();
 
-  Serial.println("[AP] Web server running — open http://192.168.4.1 in a browser");
+  Serial.println("[AP] Web server ready — open http://192.168.4.1");
   appState = SETUP_MODE;
 }
 
@@ -745,14 +537,13 @@ bool connectWiFi(const String &ssid, const String &pass) {
 void ensureWiFi() {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("[WiFi] Reconnecting…");
-    loadPrefs();
     connectWiFi(savedSSID, savedPass);
   }
 }
 
 // ── GPS config ────────────────────────────────────────────────────────────────
 void configureGPS() {
-  // Try 115200 first — module may already be configured from a previous boot
+  // Probe at 115200 first — module may already be configured from a prior boot
   Serial.println("[GPS] Probing at 115200…");
   gpsSerial.begin(GPS_BAUD_FAST, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
   delay(600);
@@ -765,17 +556,14 @@ void configureGPS() {
   }
 
   if (!gotData) {
-    // No data at 115200 — module is still at factory 9600
     Serial.println("[GPS] No data at 115200, falling back to 9600…");
-    gpsSerial.end();
-    delay(50);
+    gpsSerial.end(); delay(50);
     gpsSerial.begin(GPS_BAUD_INIT, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
     delay(500);
     Serial.println("[GPS] Switching to 115200…");
     sendUBX(gpsSerial, UBX_SET_BAUD_115200, sizeof(UBX_SET_BAUD_115200));
     delay(150);
-    gpsSerial.end();
-    delay(50);
+    gpsSerial.end(); delay(50);
     gpsSerial.begin(GPS_BAUD_FAST, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
     delay(300);
   } else {
@@ -792,38 +580,46 @@ void configureGPS() {
 
 // ── Heartbeat ping ────────────────────────────────────────────────────────────
 void pingServer() {
-  String activeKey = devKey[activeDevice];
-  if (!activeKey.length()) return;
-
+  if (apiKey.isEmpty()) return;
   WiFiClientSecure client;
   client.setInsecure();
   HTTPClient http;
   http.begin(client, PING_URL);
   http.addHeader("Content-Type", "application/json");
-  http.addHeader("X-Api-Key", activeKey);
+  http.addHeader("X-Api-Key", apiKey);
   http.setTimeout(5000);
   int code = http.POST("{}");
+  http.end();
+
   if (code == 200) {
-    Serial.printf("[PING] Online ✓  dev=%s\n",
-      devName[activeDevice].length() ? devName[activeDevice].c_str() : "?");
+    Serial.println("[PING] Online ✓");
+  } else if (code == 401 || code == 404) {
+    // Device was deleted from the app — full NVS clear + restart into AP mode
+    Serial.println("[APP] Device removed from server — clearing NVS and restarting");
+    clearPrefs();
+    delay(500);
+    ESP.restart();
   } else {
     Serial.printf("[PING] Failed HTTP %d\n", code);
   }
-  http.end();
 }
 
 // ── HTTP POST GPS fix ─────────────────────────────────────────────────────────
 void postLocation() {
   if (!gps.location.isValid() || !gps.location.isUpdated()) return;
+  if (apiKey.isEmpty()) {
+    Serial.println("[POST] No API key");
+    return;
+  }
 
   JsonDocument doc;
   doc["lat"] = gps.location.lat();
   doc["lng"] = gps.location.lng();
-  if (gps.speed.isValid())      doc["speed"]      = gps.speed.kmph();
-  if (gps.course.isValid())     doc["course"]      = gps.course.deg();
-  if (gps.altitude.isValid())   doc["altitude"]    = gps.altitude.meters();
-  if (gps.satellites.isValid()) doc["satellites"]  = (int)gps.satellites.value();
-  if (gps.hdop.isValid())       doc["hdop"]        = gps.hdop.hdop();
+  if (gps.speed.isValid())      doc["speed"]     = gps.speed.kmph();
+  if (gps.course.isValid())     doc["course"]    = gps.course.deg();
+  if (gps.altitude.isValid())   doc["altitude"]  = gps.altitude.meters();
+  if (gps.satellites.isValid()) doc["satellites"] = (int)gps.satellites.value();
+  if (gps.hdop.isValid())       doc["hdop"]      = gps.hdop.hdop();
   if (gps.date.isValid() && gps.time.isValid()) {
     char ts[25];
     snprintf(ts, sizeof(ts), "%04d-%02d-%02dT%02d:%02d:%02dZ",
@@ -835,24 +631,17 @@ void postLocation() {
   String payload;
   serializeJson(doc, payload);
 
-  String activeKey = devKey[activeDevice];
-  if (!activeKey.length()) {
-    Serial.println("[POST] No API key configured");
-    return;
-  }
-
   WiFiClientSecure client;
-  client.setInsecure();  // skip cert verification for Render's TLS
+  client.setInsecure();
   HTTPClient http;
   http.begin(client, SERVER_URL);
   http.addHeader("Content-Type", "application/json");
-  http.addHeader("X-Api-Key", activeKey);
+  http.addHeader("X-Api-Key", apiKey);
   http.setTimeout(5000);
 
   int code = http.POST(payload);
   if (code == 201) {
-    Serial.printf("[POST] OK  dev=%s lat=%.6f lng=%.6f sats=%d spd=%.1f km/h\n",
-      devName[activeDevice].length() ? devName[activeDevice].c_str() : "?",
+    Serial.printf("[POST] OK  lat=%.6f lng=%.6f sats=%d spd=%.1f km/h\n",
       gps.location.lat(), gps.location.lng(),
       gps.satellites.isValid() ? (int)gps.satellites.value() : 0,
       gps.speed.isValid() ? gps.speed.kmph() : 0.0f);
@@ -877,17 +666,15 @@ void setup() {
   configureGPS();
   loadPrefs();
 
-  // Hold BOOT button at power-on → force setup portal regardless of saved creds
+  // Hold BOOT button at power-on → force setup portal
   if (digitalRead(FORCE_AP_PIN) == LOW) {
     Serial.println("[APP] BOOT button held — forcing setup mode");
     startAP();
   } else if (savedSSID.length() > 0 && connectWiFi(savedSSID, savedPass)) {
     appState = TRACKING_MODE;
-    Serial.printf("[APP] Tracking mode — active device: %s (slot %d)\n",
-      devName[activeDevice].length() ? devName[activeDevice].c_str() : "unnamed",
-      activeDevice + 1);
+    Serial.printf("[APP] Tracking mode — key prefix: %s…\n", apiKey.substring(0, 8).c_str());
     Serial.println("[APP] Tip: hold BOOT button 3 s to return to setup mode");
-    pingServer();  // mark device online immediately on WiFi connect
+    pingServer();
   } else {
     Serial.println("[APP] No credentials or connection failed — starting setup AP");
     startAP();
@@ -923,7 +710,7 @@ void loop() {
       webServer.stop();
       dnsServer.stop();
       appState = TRACKING_MODE;
-      pingServer();  // mark device online immediately
+      pingServer();
     }
     return;
   }
@@ -943,7 +730,7 @@ void loop() {
 
   unsigned long now = millis();
 
-  // Heartbeat — keep device marked online every 10 s regardless of GPS
+  // Heartbeat — keep device marked online every 10 s regardless of GPS fix
   if (now - lastPingMs >= PING_INTERVAL_MS) {
     lastPingMs = now;
     ensureWiFi();

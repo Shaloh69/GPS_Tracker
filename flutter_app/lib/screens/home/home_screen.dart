@@ -180,8 +180,8 @@ class _HomeScreenState extends State<HomeScreen> {
                                   deviceId: tracker.devices[i].id),
                             ),
                           ),
-                          onDelete: () =>
-                              _confirmDelete(tracker.devices[i]),
+                          onReset: () =>
+                              _confirmReset(tracker.devices[i]),
                         ),
                         childCount: tracker.devices.length,
                       ),
@@ -213,24 +213,64 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Future<void> _confirmDelete(Device device) async {
+  Future<void> _confirmReset(Device device) async {
     final ok = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
         backgroundColor: AppColors.surfaceCard,
-        title: const Text('Delete Device',
-            style: TextStyle(color: Colors.white)),
-        content: Text(
-            'Remove "${device.name}" and all its location history?',
-            style: const TextStyle(color: AppColors.blue200)),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Row(
+          children: [
+            const Icon(Icons.restart_alt, color: AppColors.red, size: 22),
+            const SizedBox(width: 8),
+            const Text('Reset Device',
+                style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '"${device.name}" will be removed from your account.',
+              style: const TextStyle(color: Colors.white, fontSize: 14),
+            ),
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: AppColors.red.withAlpha(20),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: AppColors.red.withAlpha(60)),
+              ),
+              child: const Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(Icons.warning_amber_rounded,
+                      color: AppColors.amber, size: 16),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'The ESP32 will also reset — it will forget its '
+                      'Wi-Fi credentials and QR code, then reopen the '
+                      'setup portal. You will need to re-pair it.',
+                      style: TextStyle(color: AppColors.amber, fontSize: 12),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('Cancel')),
-          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: AppColors.red),
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('Delete',
-                style: TextStyle(color: AppColors.red)),
+            child: const Text('Reset & Remove'),
           ),
         ],
       ),
@@ -241,7 +281,7 @@ class _HomeScreenState extends State<HomeScreen> {
       } catch (e) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Delete failed: $e')),
+            SnackBar(content: Text('Reset failed: $e')),
           );
         }
       }
@@ -488,13 +528,13 @@ class _DeviceCard extends StatelessWidget {
   final Device device;
   final int index;
   final VoidCallback onTap;
-  final VoidCallback onDelete;
+  final VoidCallback onReset;
 
   const _DeviceCard({
     required this.device,
     required this.index,
     required this.onTap,
-    required this.onDelete,
+    required this.onReset,
   });
 
   @override
@@ -607,14 +647,22 @@ class _DeviceCard extends StatelessWidget {
                 ),
               ),
               Column(
+                mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   const Icon(Icons.chevron_right,
                       color: AppColors.blue600),
                   const SizedBox(height: 8),
-                  InkWell(
-                    onTap: onDelete,
-                    child: const Icon(Icons.delete_outline,
-                        color: AppColors.red, size: 18),
+                  Tooltip(
+                    message: 'Reset & Remove',
+                    child: InkWell(
+                      onTap: onReset,
+                      borderRadius: BorderRadius.circular(8),
+                      child: const Padding(
+                        padding: EdgeInsets.all(4),
+                        child: Icon(Icons.restart_alt,
+                            color: AppColors.red, size: 20),
+                      ),
+                    ),
                   ),
                 ],
               ),

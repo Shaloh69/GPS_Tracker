@@ -1,11 +1,10 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:provider/provider.dart';
 import '../../services/tracker_service.dart';
 import '../../services/api_service.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/gradient_background.dart';
-import '../../widgets/glass_card.dart';
 import '../../widgets/app_toast.dart';
 
 class AddDeviceScreen extends StatefulWidget {
@@ -15,35 +14,137 @@ class AddDeviceScreen extends StatefulWidget {
 }
 
 class _AddDeviceScreenState extends State<AddDeviceScreen> {
-  final _form    = GlobalKey<FormState>();
-  final _name    = TextEditingController();
-  bool _loading  = false;
-  String? _apiKey;
+  final MobileScannerController _scanner = MobileScannerController();
+  bool _scanned     = false;
+  bool _registering = false;
 
   @override
   void dispose() {
-    _name.dispose();
+    _scanner.dispose();
     super.dispose();
   }
 
-  Future<void> _submit() async {
-    if (!_form.currentState!.validate()) return;
-    setState(() => _loading = true);
+  void _onDetect(BarcodeCapture capture) {
+    if (_scanned || _registering) return;
+    final raw = capture.barcodes.isNotEmpty
+        ? capture.barcodes.first.rawValue
+        : null;
+    if (raw == null) return;
+
+    // Must be exactly 64 lowercase hex chars (ESP32 hardware-RNG key)
+    if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(raw)) {
+      showToast(context, 'Not a valid TraceX QR code', type: ToastType.error);
+      return;
+    }
+
+    setState(() => _scanned = true);
+    _scanner.stop();
+    _showNameDialog(raw);
+  }
+
+  Future<void> _showNameDialog(String scannedKey) async {
+    final nameCtrl = TextEditingController();
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surfaceCard,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text(
+          'Name Your Device',
+          style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700),
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.check_circle, color: AppColors.green, size: 18),
+                const SizedBox(width: 8),
+                Text(
+                  'QR scanned successfully!',
+                  style: TextStyle(
+                      color: Colors.white.withAlpha(178), fontSize: 13),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: nameCtrl,
+              autofocus: true,
+              style: const TextStyle(color: Colors.white),
+              decoration: const InputDecoration(
+                labelText: 'Device name',
+                hintText: 'e.g. Bike Tracker',
+                prefixIcon:
+                    Icon(Icons.devices_other, color: AppColors.blue400),
+              ),
+              onSubmitted: (_) {
+                if (nameCtrl.text.trim().isNotEmpty) Navigator.pop(ctx, true);
+              },
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel',
+                style: TextStyle(color: AppColors.blue400)),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              if (nameCtrl.text.trim().isEmpty) return;
+              Navigator.pop(ctx, true);
+            },
+            child: const Text('Register'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true && mounted) {
+      await _register(scannedKey, nameCtrl.text.trim());
+    } else {
+      // User cancelled — resume scanning
+      if (mounted) setState(() => _scanned = false);
+      _scanner.start();
+    }
+    nameCtrl.dispose();
+  }
+
+  Future<void> _register(String apiKey, String name) async {
+    setState(() => _registering = true);
     try {
-      final data = await context.read<TrackerService>()
-          .createDevice(_name.text.trim());
-      setState(() {
-        _apiKey = data['api_key'] as String;
-      });
+      await context
+          .read<TrackerService>()
+          .createDevice(name, apiKey: apiKey);
+      if (mounted) {
+        showToast(context, '$name registered!', type: ToastType.success);
+        Navigator.pop(context, true);
+      }
     } on ApiException catch (e) {
-      if (mounted) showToast(context, e.message, type: ToastType.error);
+      if (mounted) {
+        showToast(context, e.message, type: ToastType.error);
+        setState(() {
+          _scanned     = false;
+          _registering = false;
+        });
+        _scanner.start();
+      }
     } catch (_) {
       if (mounted) {
         showToast(context, 'Could not reach server. Check your connection.',
             type: ToastType.error);
+        setState(() {
+          _scanned     = false;
+          _registering = false;
+        });
+        _scanner.start();
       }
     } finally {
-      if (mounted) setState(() => _loading = false);
+      if (mounted) setState(() => _registering = false);
     }
   }
 
@@ -52,169 +153,116 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
     return Scaffold(
       body: GradientBackground(
         child: SafeArea(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                IconButton(
-                  onPressed: () => Navigator.pop(context, _apiKey != null),
-                  icon: const Icon(Icons.arrow_back, color: Colors.white),
-                ),
-                const SizedBox(height: 8),
-                const Text('Add Device',
-                    style: TextStyle(
-                        fontSize: 26,
-                        fontWeight: FontWeight.w700,
-                        color: Colors.white)),
-                const SizedBox(height: 4),
-                Text('Register a new ESP32 GPS tracker',
-                    style: TextStyle(
-                        color: Colors.white.withAlpha(153), fontSize: 14)),
-                const SizedBox(height: 32),
-
-                if (_apiKey == null) ...[
-                  Form(
-                    key: _form,
-                    child: TextFormField(
-                      controller: _name,
-                      decoration: const InputDecoration(
-                        labelText: 'Device name',
-                        hintText: 'e.g. Tracker-01',
-                        prefixIcon: Icon(Icons.devices_other,
-                            color: AppColors.blue400),
-                      ),
-                      validator: (v) =>
-                          v == null || v.trim().isEmpty ? 'Name required' : null,
+          child: Column(
+            children: [
+              // Header
+              Padding(
+                padding: const EdgeInsets.fromLTRB(4, 8, 16, 0),
+                child: Row(
+                  children: [
+                    IconButton(
+                      onPressed: () => Navigator.pop(context, false),
+                      icon: const Icon(Icons.arrow_back, color: Colors.white),
                     ),
-                  ),
-                  const SizedBox(height: 24),
-                  ElevatedButton(
-                    onPressed: _loading ? null : _submit,
-                    child: _loading
-                        ? const SizedBox(
-                            height: 20, width: 20,
-                            child: CircularProgressIndicator(
-                                strokeWidth: 2, color: Colors.white))
-                        : const Text('Register Device'),
-                  ),
-                ] else ...[
-                  // Success — show API key
-                  GlassCard(
-                    child: Column(
+                    const SizedBox(width: 4),
+                    const Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Row(
-                          children: [
-                            const Icon(Icons.check_circle,
-                                color: AppColors.green, size: 20),
-                            const SizedBox(width: 8),
-                            const Text('Device Created!',
-                                style: TextStyle(
-                                    color: AppColors.green,
-                                    fontWeight: FontWeight.w600)),
-                          ],
+                        Text(
+                          'Add Device',
+                          style: TextStyle(
+                              fontSize: 22,
+                              fontWeight: FontWeight.w700,
+                              color: Colors.white),
                         ),
-                        const SizedBox(height: 16),
-                        const Text('API Key',
-                            style: TextStyle(
-                                color: AppColors.blue300,
-                                fontSize: 12,
-                                fontWeight: FontWeight.w600)),
-                        const SizedBox(height: 6),
-                        Container(
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(
-                            color: AppColors.surface,
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(
-                                color: const Color(0x28FFFFFF)),
-                          ),
-                          child: Row(
-                            children: [
-                              Expanded(
-                                child: Text(
-                                  _apiKey!,
-                                  style: const TextStyle(
-                                      fontFamily: 'monospace',
-                                      color: AppColors.blue200,
-                                      fontSize: 12),
-                                ),
-                              ),
-                              IconButton(
-                                icon: const Icon(Icons.copy,
-                                    size: 18, color: AppColors.blue400),
-                                onPressed: () {
-                                  Clipboard.setData(
-                                      ClipboardData(text: _apiKey!));
-                                  showToast(context, 'API key copied to clipboard',
-                                      type: ToastType.success);
-                                },
-                              ),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(height: 12),
-                        Container(
-                          padding: const EdgeInsets.all(10),
-                          decoration: BoxDecoration(
-                            color: AppColors.amber.withAlpha(20),
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(
-                                color: AppColors.amber.withAlpha(60)),
-                          ),
-                          child: const Row(
-                            children: [
-                              Icon(Icons.warning_amber_rounded,
-                                  color: AppColors.amber, size: 16),
-                              SizedBox(width: 8),
-                              Expanded(
-                                child: Text(
-                                  'Copy this key now — it will not be shown again.',
-                                  style: TextStyle(
-                                      color: AppColors.amber,
-                                      fontSize: 12),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                        const Text('Paste into main.cpp:',
-                            style: TextStyle(
-                                color: AppColors.blue300,
-                                fontSize: 12,
-                                fontWeight: FontWeight.w600)),
-                        const SizedBox(height: 6),
-                        Container(
-                          padding: const EdgeInsets.all(10),
-                          decoration: BoxDecoration(
-                            color: AppColors.surface,
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Text(
-                            '#define DEVICE_API_KEY  "$_apiKey"',
-                            style: const TextStyle(
-                                fontFamily: 'monospace',
-                                color: AppColors.cyan,
-                                fontSize: 11),
-                          ),
+                        Text(
+                          'Scan the QR from your ESP32 portal',
+                          style:
+                              TextStyle(color: Color(0x99FFFFFF), fontSize: 13),
                         ),
                       ],
                     ),
-                  ),
-                  const SizedBox(height: 20),
-                  ElevatedButton.icon(
-                    onPressed: () => Navigator.pop(context, true),
-                    icon: const Icon(Icons.arrow_back),
-                    label: const Text('Back to Devices'),
-                  ),
-                ],
-              ],
-            ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
+
+              // Camera view
+              Expanded(
+                child: Stack(
+                  children: [
+                    MobileScanner(
+                      controller: _scanner,
+                      onDetect: _onDetect,
+                    ),
+                    // Corner-bracket scan overlay
+                    Center(
+                      child: SizedBox(
+                        width: 220,
+                        height: 220,
+                        child: CustomPaint(painter: _ScanOverlay()),
+                      ),
+                    ),
+                    // Registering overlay
+                    if (_registering)
+                      Container(
+                        color: Colors.black54,
+                        child: const Center(
+                          child: CircularProgressIndicator(
+                              color: AppColors.blue400),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+
+              // Instruction footer
+              Padding(
+                padding: const EdgeInsets.fromLTRB(24, 20, 24, 28),
+                child: Text(
+                  'Connect to your ESP32 hotspot (GPS-Tracker-Setup),\n'
+                  'open http://192.168.4.1, then scan the QR shown there.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                      color: Colors.white.withAlpha(115), fontSize: 12),
+                ),
+              ),
+            ],
           ),
         ),
       ),
     );
   }
+}
+
+// Corner-bracket overlay drawn over the camera feed
+class _ScanOverlay extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    const double len = 28;
+    final paint = Paint()
+      ..color = AppColors.blue400
+      ..strokeWidth = 3.5
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round;
+
+    final w = size.width;
+    final h = size.height;
+
+    // Top-left
+    canvas.drawLine(Offset(0, len), Offset.zero, paint);
+    canvas.drawLine(Offset.zero, Offset(len, 0), paint);
+    // Top-right
+    canvas.drawLine(Offset(w - len, 0), Offset(w, 0), paint);
+    canvas.drawLine(Offset(w, 0), Offset(w, len), paint);
+    // Bottom-left
+    canvas.drawLine(Offset(0, h - len), Offset(0, h), paint);
+    canvas.drawLine(Offset(0, h), Offset(len, h), paint);
+    // Bottom-right
+    canvas.drawLine(Offset(w - len, h), Offset(w, h), paint);
+    canvas.drawLine(Offset(w, h - len), Offset(w, h), paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter _) => false;
 }
