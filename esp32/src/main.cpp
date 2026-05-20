@@ -254,6 +254,11 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
   #toast.err{border-color:rgba(239,68,68,.4)}
   .reset-link{text-align:center;font-size:12px;color:#475569;cursor:pointer;text-decoration:underline;text-underline-offset:3px}
   .btn-chrome{display:block;width:100%;margin-top:10px;padding:9px;border-radius:12px;border:1px solid rgba(99,102,241,.35);background:rgba(99,102,241,.1);color:#818CF8;font-size:12px;font-weight:600;text-align:center;text-decoration:none;cursor:pointer}
+  .wire-table{width:100%;border-collapse:collapse;font-size:12px;margin-top:10px}
+  .wire-table th{text-align:left;color:#60A5FA;font-weight:700;padding:6px 8px;border-bottom:1px solid rgba(255,255,255,.08)}
+  .wire-table td{padding:6px 8px;border-bottom:1px solid rgba(255,255,255,.05);color:#CBD5E1;font-family:monospace}
+  .wire-table tr:last-child td{border-bottom:none}
+  .pin-esp{color:#34D399}.pin-gps{color:#F59E0B}.pin-note{color:#94A3B8;font-family:sans-serif;font-size:11px}
   .reset-link:hover{color:#EF4444}
 </style>
 </head>
@@ -333,6 +338,21 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
         <a class="btn-dl-confirm" href="/qr.bmp" onclick="closeDlModal()">&#11015; Download QR Image</a>
       </div>
     </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">&#128268; GPS Wiring — NEO-6M &#8596; ESP32</div>
+    <table class="wire-table">
+      <tr><th>NEO-6M</th><th>ESP32 DevKit</th><th>Notes</th></tr>
+      <tr><td class="pin-gps">VCC</td><td class="pin-esp">3.3V</td><td class="pin-note">or 5V if module has regulator</td></tr>
+      <tr><td class="pin-gps">GND</td><td class="pin-esp">GND</td><td class="pin-note">common ground</td></tr>
+      <tr><td class="pin-gps">TX</td><td class="pin-esp">GPIO 21</td><td class="pin-note">GPS sends NMEA → ESP32 RX</td></tr>
+      <tr><td class="pin-gps">RX</td><td class="pin-esp">GPIO 22</td><td class="pin-note">ESP32 TX → GPS config</td></tr>
+    </table>
+    <p style="font-size:11px;color:#475569;margin-top:10px;line-height:1.6">
+      Blue LED on NEO-6M: fast blink = searching &nbsp;&#8226;&nbsp; 1 pulse/s = satellite lock<br>
+      Place antenna with clear sky view for faster fix.
+    </p>
   </div>
 
   <div class="reset-link" onclick="resetDevice()">Reset all saved credentials</div>
@@ -875,8 +895,11 @@ void loop() {
       Serial.println("[APP] Connected via web UI — switching to tracking mode");
       webServer.stop();
       dnsServer.stop();
+      WiFi.softAPdisconnect(true); // stop AP so its network stack doesn't corrupt STA DNS
+      WiFi.mode(WIFI_STA);
+      delay(1000);                 // let DHCP/DNS settle before first HTTP call
       appState = TRACKING_MODE;
-      ledMode  = LED_RAPID;   // rapid flash until GPS locks
+      ledMode  = LED_RAPID;
       pingServer();
     }
     return;
