@@ -247,7 +247,7 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
   #toast.ok{border-color:rgba(34,197,94,.4)}
   #toast.err{border-color:rgba(239,68,68,.4)}
   .reset-link{text-align:center;font-size:12px;color:#475569;cursor:pointer;text-decoration:underline;text-underline-offset:3px}
-  .chrome-hint{font-size:11px;color:#475569;text-align:center;margin-top:10px;line-height:1.5}
+  .btn-chrome{display:block;width:100%;margin-top:10px;padding:9px;border-radius:12px;border:1px solid rgba(99,102,241,.35);background:rgba(99,102,241,.1);color:#818CF8;font-size:12px;font-weight:600;text-align:center;text-decoration:none;cursor:pointer}
   .reset-link:hover{color:#EF4444}
 </style>
 </head>
@@ -310,7 +310,7 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
         <code id="apiKeyText" class="key-val">Loading...</code>
       </div>
       <button class="btn-dl" onclick="showDlModal()">&#11015; Download QR Code</button>
-      <p class="chrome-hint">Using a captive portal? Open <strong>Chrome</strong> and go to <strong>192.168.4.1</strong> first, then download.</p>
+      <a class="btn-chrome" href="intent://192.168.4.1/#Intent;scheme=http;package=com.android.chrome;end">&#127758; Captive portal? Tap to open in Chrome</a>
     </div>
   </div>
 
