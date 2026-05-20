@@ -23,11 +23,18 @@ export async function register(req: Request, res: Response): Promise<void> {
       [id, email, hash, name ?? null]
     );
     const payload = { id, email, role: 'user' as const };
+    const accessToken  = signAccessToken(payload);
+    const refreshToken = signRefreshToken(payload);
+    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+    await pool.execute(
+      'INSERT INTO refresh_tokens (id, user_id, token, expires_at) VALUES (?, ?, ?, ?)',
+      [uuidv4(), id, refreshToken, expiresAt]
+    );
     res.status(201).json({
       success: true,
       data: {
-        accessToken: signAccessToken(payload),
-        refreshToken: signRefreshToken(payload),
+        accessToken,
+        refreshToken,
         user: { id, email, name: name ?? null, role: 'user' },
       },
     });
@@ -45,8 +52,12 @@ export async function login(req: Request, res: Response): Promise<void> {
       [email]
     );
     const user = rows[0];
-    if (!user || !(await comparePassword(password, user.password_hash))) {
-      res.status(401).json({ success: false, message: 'Invalid credentials' });
+    if (!user) {
+      res.status(401).json({ success: false, message: 'No account found with that email' });
+      return;
+    }
+    if (!(await comparePassword(password, user.password_hash))) {
+      res.status(401).json({ success: false, message: 'Incorrect password' });
       return;
     }
     const payload = { id: user.id, email: user.email, role: user.role as 'user' | 'admin' };

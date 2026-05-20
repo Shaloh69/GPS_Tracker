@@ -36,7 +36,7 @@ class GpsTrackerApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'GPS Tracker',
+      title: 'TraceX',
       debugShowCheckedModeBanner: false,
       theme: buildDarkTheme(),
       home: Consumer<AuthService>(

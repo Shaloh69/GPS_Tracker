@@ -6,6 +6,7 @@ import '../../services/api_service.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/gradient_background.dart';
 import '../../widgets/glass_card.dart';
+import '../../widgets/app_toast.dart';
 
 class AddDeviceScreen extends StatefulWidget {
   const AddDeviceScreen({super.key});
@@ -35,18 +36,11 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
         _apiKey = data['api_key'] as String;
       });
     } on ApiException catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(e.message),
-              backgroundColor: AppColors.red),
-        );
-      }
+      if (mounted) showToast(context, e.message, type: ToastType.error);
     } catch (_) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Could not reach server'),
-              backgroundColor: AppColors.red),
-        );
+        showToast(context, 'Could not reach server. Check your connection.',
+            type: ToastType.error);
       }
     } finally {
       if (mounted) setState(() => _loading = false);
@@ -153,10 +147,8 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
                                 onPressed: () {
                                   Clipboard.setData(
                                       ClipboardData(text: _apiKey!));
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(
-                                        content: Text('API key copied')),
-                                  );
+                                  showToast(context, 'API key copied to clipboard',
+                                      type: ToastType.success);
                                 },
                               ),
                             ],
