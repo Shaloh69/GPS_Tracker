@@ -60,9 +60,9 @@ enum LedMode {
   LED_RAPID,        // 100 ms toggle  — tracking, waiting for GPS satellite fix
   LED_PULSE,        // 100 ms ON, 900 ms OFF per second — GPS locked + sending OK
 };
-LedMode      ledMode    = LED_OFF;
-bool         ledState   = false;
-unsigned long ledLastMs = 0;
+volatile LedMode       ledMode    = LED_OFF;
+volatile bool          ledState   = false;
+volatile unsigned long ledLastMs  = 0;
 
 void updateLed() {
   unsigned long now = millis();
@@ -96,6 +96,10 @@ void updateLed() {
   }
 }
 
+// FreeRTOS timer — keeps LED blinking even while HTTP calls block the main loop
+static TimerHandle_t ledTimerH = NULL;
+static void ledTimerCB(TimerHandle_t) { updateLed(); }
+
 // NVS state
 String savedSSID, savedPass, apiKey;
 
@@ -113,6 +117,12 @@ static const uint8_t UBX_SAVE_CONFIG[] = {
   0xB5,0x62,0x06,0x09,0x0D,0x00,0x00,0x00,0x00,0x00,
   0xFF,0xFF,0x00,0x00,0x00,0x00,0x00,0x00,0x17,0x31,0xBF
 };
+// UBX-CFG-MSG: explicitly enable NMEA GGA/RMC/GSA/GSV on UART1 at 1 Hz
+// Checksums verified via Fletcher-8 over class+id+len+payload
+static const uint8_t UBX_NMEA_GGA[] = {0xB5,0x62,0x06,0x01,0x03,0x00,0xF0,0x00,0x01,0xFB,0x10};
+static const uint8_t UBX_NMEA_RMC[] = {0xB5,0x62,0x06,0x01,0x03,0x00,0xF0,0x04,0x01,0xFF,0x18};
+static const uint8_t UBX_NMEA_GSA[] = {0xB5,0x62,0x06,0x01,0x03,0x00,0xF0,0x02,0x01,0xFD,0x14};
+static const uint8_t UBX_NMEA_GSV[] = {0xB5,0x62,0x06,0x01,0x03,0x00,0xF0,0x03,0x01,0xFE,0x16};
 
 static void sendUBX(HardwareSerial &s, const uint8_t *cmd, size_t len) {
   s.write(cmd, len); s.flush();
@@ -713,8 +723,10 @@ void ensureWiFi() {
 // ── GPS config ────────────────────────────────────────────────────────────────
 void configureGPS() {
   // Probe at 115200 first — module may already be configured from a prior boot
+  // 2048-byte RX buffer: at 115200 baud + 1 Hz NMEA this gives ~5 s margin
+  // before overflow during blocking HTTP calls, preventing GPS data loss
   Serial.println("[GPS] Probing at 115200…");
-  gpsSerial.begin(GPS_BAUD_FAST, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
+  gpsSerial.begin(GPS_BAUD_FAST, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN, false, 2048U);
   delay(600);
 
   bool gotData = false;
@@ -728,7 +740,7 @@ void configureGPS() {
     Serial.println("[GPS] No data at 115200 — module may be at default 9600 baud");
     Serial.println("[GPS] Check wiring: NEO-6M TX → GPIO21,  NEO-6M RX → GPIO22,  VCC → 3.3V");
     gpsSerial.end(); delay(50);
-    gpsSerial.begin(GPS_BAUD_INIT, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
+    gpsSerial.begin(GPS_BAUD_INIT, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN, false, 2048U);
     delay(500);
 
     // Try reading at 9600 to confirm module is wired correctly
@@ -747,19 +759,29 @@ void configureGPS() {
     sendUBX(gpsSerial, UBX_SET_BAUD_115200, sizeof(UBX_SET_BAUD_115200));
     delay(150);
     gpsSerial.end(); delay(50);
-    gpsSerial.begin(GPS_BAUD_FAST, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
+    gpsSerial.begin(GPS_BAUD_FAST, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN, false, 2048U);
     delay(300);
   } else {
     Serial.println("[GPS] ✓ Module connected — NEO-6M responding at 115200 baud");
     Serial.printf("[GPS]   RX pin: GPIO%d  TX pin: GPIO%d\n", GPS_RX_PIN, GPS_TX_PIN);
   }
 
-  Serial.println("[GPS] Setting 1 Hz rate…");
+  Serial.println("[GPS] Setting 1 Hz update rate…");
   sendUBX(gpsSerial, UBX_SET_RATE_1HZ, sizeof(UBX_SET_RATE_1HZ));
   delay(100);
+
+  // Explicitly re-enable NMEA sentences on UART1.
+  // A prior bad save can leave the module outputting UBX binary only, which
+  // causes chars to flow but TinyGPS++ to parse nothing → sats=0 forever.
+  Serial.println("[GPS] Enabling NMEA sentences (GGA, RMC, GSA, GSV)…");
+  sendUBX(gpsSerial, UBX_NMEA_GGA, sizeof(UBX_NMEA_GGA)); delay(50);
+  sendUBX(gpsSerial, UBX_NMEA_RMC, sizeof(UBX_NMEA_RMC)); delay(50);
+  sendUBX(gpsSerial, UBX_NMEA_GSA, sizeof(UBX_NMEA_GSA)); delay(50);
+  sendUBX(gpsSerial, UBX_NMEA_GSV, sizeof(UBX_NMEA_GSV)); delay(50);
+
   sendUBX(gpsSerial, UBX_SAVE_CONFIG, sizeof(UBX_SAVE_CONFIG));
   delay(200);
-  Serial.println("[GPS] ✓ Configuration saved — waiting for satellite lock…");
+  Serial.println("[GPS] ✓ Configuration saved — NMEA output enabled, waiting for fix…");
   Serial.println("[GPS]   LED off/solid = searching  |  LED blinks 1/s = fix acquired");
 }
 
@@ -858,6 +880,11 @@ void setup() {
   digitalWrite(LED_PIN, LOW);
   pinMode(FORCE_AP_PIN, INPUT_PULLUP);
 
+  // Start LED timer — runs in FreeRTOS timer daemon so the LED keeps blinking
+  // during blocking HTTP calls (ping, post) that freeze the main loop
+  ledTimerH = xTimerCreate("led", pdMS_TO_TICKS(100), pdTRUE, NULL, ledTimerCB);
+  if (ledTimerH) xTimerStart(ledTimerH, 0);
+
   configureGPS();
   loadPrefs();
 
@@ -887,7 +914,36 @@ void setup() {
 }
 
 void loop() {
-  while (gpsSerial.available()) gps.encode(gpsSerial.read());
+  // Drain GPS serial buffer and feed TinyGPS++.
+  // First 30 complete sentences are printed raw so we can verify:
+  //   • sentence prefix ($GP vs $GN)  • checksum validity  • fix fields
+  {
+    static uint8_t  nmeaDumpLeft = 30;
+    static char     nmea_line[140];
+    static uint8_t  nmea_pos = 0;
+
+    while (gpsSerial.available()) {
+      char c = gpsSerial.read();
+      gps.encode(c);
+
+      if (nmeaDumpLeft > 0) {
+        if (c == '$') {
+          nmea_pos = 0;
+          nmea_line[nmea_pos++] = '$';
+        } else if (nmea_pos > 0) {
+          if (c != '\r' && nmea_pos < 138) nmea_line[nmea_pos++] = c;
+          if (c == '\n') {
+            nmea_line[nmea_pos - 1] = '\0';   // strip newline
+            if (nmea_pos > 6) {               // skip noise / short fragments
+              Serial.printf("[NMEA] %s\n", nmea_line);
+              nmeaDumpLeft--;
+            }
+            nmea_pos = 0;
+          }
+        }
+      }
+    }
+  }
 
   // First time NMEA chars arrive — GPS module is communicating
   if (!gpsNmeaStarted && gps.charsProcessed() > 10) {
@@ -974,8 +1030,12 @@ void loop() {
     } else {
       if (now - lastGpsLogMs >= GPS_LOG_INTERVAL_MS) {
         lastGpsLogMs = now;
-        Serial.printf("[GPS] Waiting for fix…  chars=%lu  sats=%d  hdop=%.2f\n",
+        // ok=sentences parsed OK, err=checksum failures
+        // ok=0+err=0 → binary UBX or no data; ok=0+err>0 → baud/noise; ok>0 → NMEA fine
+        Serial.printf("[GPS] Waiting for fix…  chars=%lu  ok=%lu  err=%lu  sats=%d  hdop=%.2f\n",
           gps.charsProcessed(),
+          gps.passedChecksum(),
+          gps.failedChecksum(),
           gps.satellites.isValid() ? (int)gps.satellites.value() : 0,
           gps.hdop.isValid()       ? gps.hdop.hdop()             : 99.0f);
       }
