@@ -123,6 +123,18 @@ static const uint8_t UBX_NMEA_GGA[] = {0xB5,0x62,0x06,0x01,0x03,0x00,0xF0,0x00,0
 static const uint8_t UBX_NMEA_RMC[] = {0xB5,0x62,0x06,0x01,0x03,0x00,0xF0,0x04,0x01,0xFF,0x18};
 static const uint8_t UBX_NMEA_GSA[] = {0xB5,0x62,0x06,0x01,0x03,0x00,0xF0,0x02,0x01,0xFD,0x14};
 static const uint8_t UBX_NMEA_GSV[] = {0xB5,0x62,0x06,0x01,0x03,0x00,0xF0,0x03,0x01,0xFE,0x16};
+// UBX-CFG-CFG: clear all saved config + reload factory defaults.
+// clearMask=0xFFFF  saveMask=0  loadMask=0xFFFF  deviceMask=0x17 (BBR+Flash+EEPROM+SPI)
+// This is the cure for the module being stuck in UBX-binary-only output mode:
+// after this command it reverts to 9600-baud NMEA output (factory state).
+static const uint8_t UBX_CFG_CLEAR[] = {
+  0xB5,0x62,0x06,0x09,0x0D,0x00,
+  0xFF,0xFF,0x00,0x00,  // clearMask
+  0x00,0x00,0x00,0x00,  // saveMask
+  0xFF,0xFF,0x00,0x00,  // loadMask
+  0x17,                  // deviceMask
+  0x2F,0xAE              // Fletcher-8 checksum
+};
 
 static void sendUBX(HardwareSerial &s, const uint8_t *cmd, size_t len) {
   s.write(cmd, len); s.flush();
@@ -722,66 +734,56 @@ void ensureWiFi() {
 
 // ── GPS config ────────────────────────────────────────────────────────────────
 void configureGPS() {
-  // Probe at 115200 first — module may already be configured from a prior boot
-  // 2048-byte RX buffer: at 115200 baud + 1 Hz NMEA this gives ~5 s margin
-  // before overflow during blocking HTTP calls, preventing GPS data loss
-  Serial.println("[GPS] Probing at 115200…");
+  // ── Step 1: Factory-clear at 115200 ──────────────────────────────────────────
+  // The HW-248 backup battery keeps saved config alive across power cycles.
+  // Diagnosis: ok=0 err=0 with chars growing = pure UBX binary output — the
+  // module was saved in UBX-binary-only mode by a prior firmware run.
+  // Fix: UBX-CFG-CFG clear wipes all saved config and reverts the module to
+  // factory defaults (9600 baud, NMEA output).  Send at 115200 first in case
+  // the module is stuck there; if it's already at 9600 the bytes arrive garbled
+  // which is harmless — it means the module is already in the right state.
+  Serial.println("[GPS] Sending factory config reset at 115200…");
   gpsSerial.begin(GPS_BAUD_FAST, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN, false, 2048U);
-  delay(600);
+  delay(300);
+  sendUBX(gpsSerial, UBX_CFG_CLEAR, sizeof(UBX_CFG_CLEAR));
+  delay(700);  // module needs ~600 ms to apply defaults and switch baud to 9600
+  gpsSerial.end(); delay(100);
+
+  // ── Step 2: Open at 9600 (factory default — permanent operating baud) ────────
+  // We no longer send UBX_SET_BAUD_115200 at all.  That command, when saved,
+  // is what caused the stuck-in-UBX-binary state in the first place.
+  Serial.printf("[GPS] Opening at 9600 baud  RX=GPIO%d TX=GPIO%d\n",
+    GPS_RX_PIN, GPS_TX_PIN);
+  gpsSerial.begin(GPS_BAUD_INIT, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN, false, 2048U);
+  delay(500);
+
+  // Second clear at 9600 catches modules that were stuck in UBX-binary at 9600
+  sendUBX(gpsSerial, UBX_CFG_CLEAR, sizeof(UBX_CFG_CLEAR));
+  delay(700);
 
   bool gotData = false;
   unsigned long t = millis();
-  while (millis() - t < 1200) {
+  while (millis() - t < 2000) {
     if (gpsSerial.available()) { gotData = true; break; }
     delay(10);
   }
-
   if (!gotData) {
-    Serial.println("[GPS] No data at 115200 — module may be at default 9600 baud");
-    Serial.println("[GPS] Check wiring: NEO-6M TX → GPIO21,  NEO-6M RX → GPIO22,  VCC → 3.3V");
-    gpsSerial.end(); delay(50);
-    gpsSerial.begin(GPS_BAUD_INIT, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN, false, 2048U);
-    delay(500);
-
-    // Try reading at 9600 to confirm module is wired correctly
-    bool gotAt9600 = false;
-    unsigned long t2 = millis();
-    while (millis() - t2 < 1000) {
-      if (gpsSerial.available()) { gotAt9600 = true; break; }
-      delay(10);
-    }
-    if (!gotAt9600) {
-      Serial.println("[GPS] ✗ NO DATA at 9600 either — check wiring and power!");
-    } else {
-      Serial.println("[GPS] ✓ Module found at 9600 — reconfiguring to 115200…");
-    }
-
-    sendUBX(gpsSerial, UBX_SET_BAUD_115200, sizeof(UBX_SET_BAUD_115200));
-    delay(150);
-    gpsSerial.end(); delay(50);
-    gpsSerial.begin(GPS_BAUD_FAST, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN, false, 2048U);
-    delay(300);
+    Serial.println("[GPS] ✗ No data — check wiring:");
+    Serial.println("[GPS]   NEO-6M TX -> GPIO21  |  NEO-6M RX -> GPIO22  |  VCC -> 3.3V  |  GND -> GND");
   } else {
-    Serial.println("[GPS] ✓ Module connected — NEO-6M responding at 115200 baud");
-    Serial.printf("[GPS]   RX pin: GPIO%d  TX pin: GPIO%d\n", GPS_RX_PIN, GPS_TX_PIN);
+    Serial.println("[GPS] ✓ Module responding at 9600 baud");
   }
 
-  Serial.println("[GPS] Setting 1 Hz update rate…");
-  sendUBX(gpsSerial, UBX_SET_RATE_1HZ, sizeof(UBX_SET_RATE_1HZ));
-  delay(100);
-
-  // Explicitly re-enable NMEA sentences on UART1.
-  // A prior bad save can leave the module outputting UBX binary only, which
-  // causes chars to flow but TinyGPS++ to parse nothing → sats=0 forever.
+  // ── Step 3: Enable NMEA sentences + 1 Hz rate + save ─────────────────────────
   Serial.println("[GPS] Enabling NMEA sentences (GGA, RMC, GSA, GSV)…");
   sendUBX(gpsSerial, UBX_NMEA_GGA, sizeof(UBX_NMEA_GGA)); delay(50);
   sendUBX(gpsSerial, UBX_NMEA_RMC, sizeof(UBX_NMEA_RMC)); delay(50);
   sendUBX(gpsSerial, UBX_NMEA_GSA, sizeof(UBX_NMEA_GSA)); delay(50);
   sendUBX(gpsSerial, UBX_NMEA_GSV, sizeof(UBX_NMEA_GSV)); delay(50);
-
-  sendUBX(gpsSerial, UBX_SAVE_CONFIG, sizeof(UBX_SAVE_CONFIG));
-  delay(200);
-  Serial.println("[GPS] ✓ Configuration saved — NMEA output enabled, waiting for fix…");
+  Serial.println("[GPS] Setting 1 Hz update rate…");
+  sendUBX(gpsSerial, UBX_SET_RATE_1HZ, sizeof(UBX_SET_RATE_1HZ)); delay(100);
+  sendUBX(gpsSerial, UBX_SAVE_CONFIG, sizeof(UBX_SAVE_CONFIG));    delay(200);
+  Serial.println("[GPS] ✓ Config saved — 9600 baud NMEA, waiting for satellite fix…");
   Serial.println("[GPS]   LED off/solid = searching  |  LED blinks 1/s = fix acquired");
 }
 
