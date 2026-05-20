@@ -330,9 +330,11 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
   <div class="reset-link" onclick="resetDevice()">Reset all saved credentials</div>
 </div>
 <div id="toast"></div>
+<canvas id="qrCv" style="display:none"></canvas>
 
 <script>
   var selectedSSID='';
+  var qrCvReady=false;
   async function pollStatus(){
     try{
       var r=await fetch('/status'),d=await r.json();
@@ -400,16 +402,10 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
   function closeDlModal(){document.getElementById('dlModal').classList.remove('show');}
   function doDownloadQR(){
     closeDlModal();
-    var qr=document.getElementById('qrImg');
-    var c=document.createElement('canvas');
-    c.width=qr.naturalWidth||270;c.height=qr.naturalHeight||270;
-    var ctx=c.getContext('2d');
-    ctx.fillStyle='#ffffff';ctx.fillRect(0,0,c.width,c.height);
-    ctx.drawImage(qr,0,0);
+    if(!qrCvReady){toast('QR not ready — wait a moment and try again','err');return;}
     var a=document.createElement('a');
-    try{a.href=c.toDataURL('image/png');}
-    catch(e){a.href='/qr.svg';a.download='tracex-device-qr.svg';document.body.appendChild(a);a.click();document.body.removeChild(a);return;}
-    a.download='tracex-device-qr.png';
+    a.href=document.getElementById('qrCv').toDataURL('image/png');
+    a.download='TraceX_DeviceQR.png';
     document.body.appendChild(a);a.click();document.body.removeChild(a);
   }
   var toastTimer;
@@ -417,6 +413,17 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
     var el=document.getElementById('toast');el.textContent=msg;el.className='show '+(type||'');
     clearTimeout(toastTimer);toastTimer=setTimeout(function(){el.className='';},3500);
   }
+  // Pre-render QR to canvas using fillRect (never taints canvas, unlike drawImage(svgImg))
+  fetch('/qr.svg').then(function(r){return r.text();}).then(function(t){
+    var m=t.match(/svg[^>]*width="(\d+)"/);var sz=m?+m[1]:270;
+    var cv=document.getElementById('qrCv');cv.width=sz;cv.height=sz;
+    var ctx=cv.getContext('2d');
+    ctx.fillStyle='#fff';ctx.fillRect(0,0,sz,sz);
+    ctx.fillStyle='#000';
+    var re=/<rect x="(\d+)" y="(\d+)" width="\d+" height="\d+"\/>/g,md;
+    while((md=re.exec(t))!==null)ctx.fillRect(+md[1],+md[2],6,6);
+    qrCvReady=true;
+  }).catch(function(){});
   (async function(){
     await pollStatus();
     try{
