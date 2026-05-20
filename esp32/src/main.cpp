@@ -40,11 +40,16 @@ Preferences    prefs;
 TinyGPSPlus    gps;
 HardwareSerial gpsSerial(2);
 
-unsigned long lastPostMs  = 0;
-unsigned long lastPingMs  = 0;
-unsigned long bootHoldMs  = 0;
-bool gpsReady             = false;
-bool deviceRegistered     = false; // true after first successful 200 ping
+unsigned long lastPostMs   = 0;
+unsigned long lastPingMs   = 0;
+unsigned long lastSysMs    = 0;
+unsigned long lastGpsLogMs = 0;
+unsigned long bootHoldMs   = 0;
+bool gpsReady              = false;
+bool deviceRegistered      = false; // true after first successful 200 ping
+
+#define SYS_LOG_INTERVAL_MS  30000  // system health log every 30 s
+#define GPS_LOG_INTERVAL_MS   5000  // GPS-waiting log every 5 s (not every 1 s)
 
 // ── LED state machine ─────────────────────────────────────────────────────────
 enum LedMode {
@@ -422,6 +427,7 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
 // ── QR code SVG (served from /qr.svg) ────────────────────────────────────────
 // Uses QR version 5 (37x37 matrix) with ECC_LOW — handles 64-byte hex key
 void handleQRSvg() {
+  Serial.printf("[WEB] /qr.svg requested  key: %s…\n", apiKey.substring(0, 8).c_str());
   const uint8_t version    = 5;
   const int     moduleSize = 6;
   const int     quietZone  = 4;
@@ -471,6 +477,8 @@ void handleQRSvg() {
 // 1-bit monochrome BMP (~9.6 KB). No JS canvas needed — Content-Disposition
 // forces the system download manager even in Android captive-portal WebView.
 void handleQRBmp() {
+  Serial.printf("[WEB] /qr.bmp download  key: %s…  heap: %lu B\n",
+    apiKey.substring(0, 8).c_str(), (unsigned long)ESP.getFreeHeap());
   const uint8_t version    = 5;
   const int     moduleSize = 6;
   const int     quietZone  = 4;
@@ -666,7 +674,8 @@ bool connectWiFi(const String &ssid, const String &pass) {
     delay(50);
     if ((millis() - t) % 400 < 50) Serial.print(".");
   }
-  Serial.printf("\n[WiFi] Connected — IP: %s\n", WiFi.localIP().toString().c_str());
+  Serial.printf("\n[WiFi] Connected — IP: %s  RSSI: %d dBm  CH: %d\n",
+    WiFi.localIP().toString().c_str(), WiFi.RSSI(), WiFi.channel());
   return true;
 }
 
@@ -726,26 +735,27 @@ void pingServer() {
   http.addHeader("Content-Type", "application/json");
   http.addHeader("X-Api-Key", apiKey);
   http.setTimeout(5000);
+  Serial.printf("[PING] → %s  key: %s…\n", PING_URL, apiKey.substring(0, 8).c_str());
   int code = http.POST("{}");
-  http.end();
 
   if (code == 200) {
     deviceRegistered = true;
-    Serial.println("[PING] Online ✓");
+    Serial.printf("[PING] ✓ Online  heap: %lu B\n", (unsigned long)ESP.getFreeHeap());
   } else if (code == 401 || code == 404) {
     if (deviceRegistered) {
-      // Was confirmed registered before — must have been deleted from app
-      Serial.println("[APP] Device removed from server — clearing NVS and restarting");
+      Serial.printf("[PING] ✗ HTTP %d — device removed from app, clearing NVS & restarting\n", code);
+      http.end();
       clearPrefs();
       delay(500);
       ESP.restart();
     } else {
-      // Never registered yet — scan the QR in the TraceX app first
-      Serial.println("[PING] Not registered yet — scan QR in TraceX app to pair");
+      Serial.printf("[PING] ✗ HTTP %d — not registered yet, scan QR in TraceX app to pair\n", code);
     }
   } else {
-    Serial.printf("[PING] Failed HTTP %d\n", code);
+    String body = http.getString();
+    Serial.printf("[PING] ✗ HTTP %d  body: %.80s\n", code, body.c_str());
   }
+  http.end();
 }
 
 // ── HTTP POST GPS fix ─────────────────────────────────────────────────────────
@@ -785,14 +795,17 @@ void postLocation() {
 
   int code = http.POST(payload);
   if (code == 201) {
-    Serial.printf("[POST] OK  lat=%.6f lng=%.6f sats=%d spd=%.1f km/h\n",
+    Serial.printf("[POST] ✓ lat=%.6f lng=%.6f  sats=%d  spd=%.1fkm/h  hdop=%.2f  alt=%.1fm\n",
       gps.location.lat(), gps.location.lng(),
       gps.satellites.isValid() ? (int)gps.satellites.value() : 0,
-      gps.speed.isValid() ? gps.speed.kmph() : 0.0f);
-    ledMode = LED_PULSE;   // GPS locked + sending OK
+      gps.speed.isValid()    ? gps.speed.kmph()       : 0.0f,
+      gps.hdop.isValid()     ? gps.hdop.hdop()        : 99.0f,
+      gps.altitude.isValid() ? gps.altitude.meters()  : 0.0f);
+    ledMode = LED_PULSE;
   } else {
-    Serial.printf("[POST] FAIL HTTP %d\n", code);
-    ledMode = LED_RAPID;   // back to searching state on send failure
+    String body = http.getString();
+    Serial.printf("[POST] ✗ HTTP %d  body: %.80s\n", code, body.c_str());
+    ledMode = LED_RAPID;
   }
   http.end();
 }
@@ -846,8 +859,10 @@ void loop() {
 
   if (gps.location.isUpdated() && !gpsReady) {
     gpsReady = true;
-    Serial.printf("[GPS] First fix! Sats=%d\n",
-      gps.satellites.isValid() ? (int)gps.satellites.value() : 0);
+    Serial.printf("[GPS] ✓ First fix!  lat=%.6f lng=%.6f  sats=%d  hdop=%.2f\n",
+      gps.location.lat(), gps.location.lng(),
+      gps.satellites.isValid() ? (int)gps.satellites.value() : 0,
+      gps.hdop.isValid()       ? gps.hdop.hdop()             : 99.0f);
   }
 
   if (appState == SETUP_MODE) {
@@ -883,6 +898,18 @@ void loop() {
 
   unsigned long now = millis();
 
+  // System health log every 30 s
+  if (now - lastSysMs >= SYS_LOG_INTERVAL_MS) {
+    lastSysMs = now;
+    Serial.printf("[SYS] Uptime: %lus  Heap: %luB  WiFi: %s (%ddBm)  GPS: %s  Sats: %d\n",
+      now / 1000,
+      (unsigned long)ESP.getFreeHeap(),
+      WiFi.status() == WL_CONNECTED ? WiFi.SSID().c_str() : "DOWN",
+      WiFi.RSSI(),
+      gpsReady ? "LOCKED" : "SEARCHING",
+      gps.satellites.isValid() ? (int)gps.satellites.value() : 0);
+  }
+
   // Heartbeat — keep device marked online every 10 s regardless of GPS fix
   if (now - lastPingMs >= PING_INTERVAL_MS) {
     lastPingMs = now;
@@ -896,9 +923,13 @@ void loop() {
     if (gpsReady) {
       postLocation();
     } else {
-      Serial.printf("[GPS] Waiting for fix… chars=%lu sats=%d\n",
-        gps.charsProcessed(),
-        gps.satellites.isValid() ? (int)gps.satellites.value() : 0);
+      if (now - lastGpsLogMs >= GPS_LOG_INTERVAL_MS) {
+        lastGpsLogMs = now;
+        Serial.printf("[GPS] Waiting for fix…  chars=%lu  sats=%d  hdop=%.2f\n",
+          gps.charsProcessed(),
+          gps.satellites.isValid() ? (int)gps.satellites.value() : 0,
+          gps.hdop.isValid()       ? gps.hdop.hdop()             : 99.0f);
+      }
     }
   }
 }

@@ -1,6 +1,7 @@
 import { Response, NextFunction } from 'express';
 import { verifyToken } from '../utils/auth';
 import { pool } from '../config/database';
+import { logger } from '../utils/logger';
 import { AuthRequest } from '../types';
 
 export function requireAuth(req: AuthRequest, res: Response, next: NextFunction): void {
@@ -36,6 +37,7 @@ export async function requireDeviceKey(
 ): Promise<void> {
   const apiKey = req.headers['x-api-key'] as string | undefined;
   if (!apiKey) {
+    logger.warn('[AUTH] Device request missing X-Api-Key header');
     res.status(401).json({ success: false, message: 'X-Api-Key header required' });
     return;
   }
@@ -45,12 +47,15 @@ export async function requireDeviceKey(
       [apiKey]
     );
     if (!rows.length) {
+      logger.warn(`[AUTH] Invalid API key: ${apiKey.slice(0, 8)}… — no matching active device`);
       res.status(401).json({ success: false, message: 'Invalid API key' });
       return;
     }
     req.device = { id: rows[0].id, name: rows[0].name };
+    logger.debug(`[AUTH] Device authenticated: "${rows[0].name}" (${rows[0].id.slice(0, 8)}…)`);
     next();
   } catch (err) {
+    logger.error('[AUTH] requireDeviceKey DB error', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 }

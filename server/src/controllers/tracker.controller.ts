@@ -33,6 +33,7 @@ export async function createDevice(req: AuthRequest, res: Response): Promise<voi
       'INSERT INTO devices (id, name, api_key, owner_id) VALUES (?, ?, ?, ?)',
       [id, name.trim(), apiKey, req.user!.id]
     );
+    logger.info(`[DEVICE] Registered: "${name.trim()}"  id=${id.slice(0, 8)}…  key=${apiKey.slice(0, 8)}…  source=${api_key ? 'QR-scan' : 'auto-generated'}  owner=${req.user!.id.slice(0, 8)}…`);
     res.status(201).json({
       success: true,
       data: { id, name: name.trim(), api_key: apiKey },
@@ -40,6 +41,7 @@ export async function createDevice(req: AuthRequest, res: Response): Promise<voi
     });
   } catch (err: any) {
     if (err.code === 'ER_DUP_ENTRY') {
+      logger.warn(`[DEVICE] Duplicate key on register: "${name.trim()}"  key=${apiKey.slice(0, 8)}…`);
       res.status(409).json({ success: false, message: 'This device is already registered to an account' });
       return;
     }
@@ -85,6 +87,7 @@ export async function pingDevice(req: AuthRequest, res: Response): Promise<void>
       deviceId: device.id,
       isOnline: true,
     });
+    logger.info(`[PING] "${device.name}" (${device.id.slice(0, 8)}…) is online`);
     res.json({ success: true });
   } catch (err) {
     logger.error('pingDevice error', err);
@@ -127,6 +130,7 @@ export async function deleteDevice(req: AuthRequest, res: Response): Promise<voi
       res.status(404).json({ success: false, message: 'Device not found' });
       return;
     }
+    logger.info(`[DEVICE] Deleted: id=${deviceId.slice(0, 8)}…  by owner=${req.user!.id.slice(0, 8)}…`);
     res.json({ success: true, message: 'Device deleted' });
   } catch (err) {
     logger.error('deleteDevice error', err);
