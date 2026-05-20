@@ -40,10 +40,11 @@ Preferences    prefs;
 TinyGPSPlus    gps;
 HardwareSerial gpsSerial(2);
 
-unsigned long lastPostMs = 0;
-unsigned long lastPingMs = 0;
-unsigned long bootHoldMs = 0;
-bool gpsReady = false;
+unsigned long lastPostMs  = 0;
+unsigned long lastPingMs  = 0;
+unsigned long bootHoldMs  = 0;
+bool gpsReady             = false;
+bool deviceRegistered     = false; // true after first successful 200 ping
 
 // ── LED state machine ─────────────────────────────────────────────────────────
 enum LedMode {
@@ -675,13 +676,19 @@ void pingServer() {
   http.end();
 
   if (code == 200) {
+    deviceRegistered = true;
     Serial.println("[PING] Online ✓");
   } else if (code == 401 || code == 404) {
-    // Device was deleted from the app — full NVS clear + restart into AP mode
-    Serial.println("[APP] Device removed from server — clearing NVS and restarting");
-    clearPrefs();
-    delay(500);
-    ESP.restart();
+    if (deviceRegistered) {
+      // Was confirmed registered before — must have been deleted from app
+      Serial.println("[APP] Device removed from server — clearing NVS and restarting");
+      clearPrefs();
+      delay(500);
+      ESP.restart();
+    } else {
+      // Never registered yet — scan the QR in the TraceX app first
+      Serial.println("[PING] Not registered yet — scan QR in TraceX app to pair");
+    }
   } else {
     Serial.printf("[PING] Failed HTTP %d\n", code);
   }
