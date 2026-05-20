@@ -156,6 +156,15 @@ void clearPrefs() {
   prefs.end();
 }
 
+void clearWiFiPrefs() {
+  prefs.begin("gps-tracker", false);
+  prefs.remove("ssid");
+  prefs.remove("pass");
+  prefs.end();
+  savedSSID = "";
+  savedPass = "";
+}
+
 // ── HTML portal ───────────────────────────────────────────────────────────────
 const char HTML_PAGE[] PROGMEM = R"rawhtml(
 <!DOCTYPE html>
@@ -730,7 +739,14 @@ void setup() {
     Serial.println("[APP] Tip: hold BOOT button 3 s to return to setup mode");
     pingServer();
   } else {
-    Serial.println("[APP] No credentials or connection failed — starting setup AP");
+    if (savedSSID.length() > 0) {
+      // Had credentials but couldn't connect — forget them so portal starts clean
+      Serial.printf("[APP] Could not connect to \"%s\" — forgetting WiFi credentials\n",
+        savedSSID.c_str());
+      clearWiFiPrefs();
+    } else {
+      Serial.println("[APP] No credentials saved — starting setup AP");
+    }
     startAP();
   }
 
