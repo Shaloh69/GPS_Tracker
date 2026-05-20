@@ -45,6 +45,50 @@ unsigned long lastPingMs = 0;
 unsigned long bootHoldMs = 0;
 bool gpsReady = false;
 
+// ── LED state machine ─────────────────────────────────────────────────────────
+enum LedMode {
+  LED_OFF,          // solid off
+  LED_SLOW,         // 800 ms toggle  — setup / AP portal
+  LED_MEDIUM,       // 300 ms toggle  — WiFi connecting / reconnecting
+  LED_RAPID,        // 100 ms toggle  — tracking, waiting for GPS satellite fix
+  LED_PULSE,        // 100 ms ON, 900 ms OFF per second — GPS locked + sending OK
+};
+LedMode      ledMode    = LED_OFF;
+bool         ledState   = false;
+unsigned long ledLastMs = 0;
+
+void updateLed() {
+  unsigned long now = millis();
+  switch (ledMode) {
+    case LED_OFF:
+      digitalWrite(LED_PIN, LOW);
+      break;
+    case LED_SLOW:
+      if (now - ledLastMs >= 800) {
+        ledLastMs = now; ledState = !ledState;
+        digitalWrite(LED_PIN, ledState);
+      }
+      break;
+    case LED_MEDIUM:
+      if (now - ledLastMs >= 300) {
+        ledLastMs = now; ledState = !ledState;
+        digitalWrite(LED_PIN, ledState);
+      }
+      break;
+    case LED_RAPID:
+      if (now - ledLastMs >= 100) {
+        ledLastMs = now; ledState = !ledState;
+        digitalWrite(LED_PIN, ledState);
+      }
+      break;
+    case LED_PULSE:
+      // brief 100 ms flash once per second
+      if (ledState  && now - ledLastMs >= 100)  { ledLastMs = now; ledState = false; digitalWrite(LED_PIN, LOW);  }
+      if (!ledState && now - ledLastMs >= 900)  { ledLastMs = now; ledState = true;  digitalWrite(LED_PIN, HIGH); }
+      break;
+  }
+}
+
 // NVS state
 String savedSSID, savedPass, apiKey;
 
@@ -510,12 +554,14 @@ void startAP() {
   webServer.begin();
 
   Serial.println("[AP] Web server ready — open http://192.168.4.1");
+  ledMode = LED_SLOW;
   appState = SETUP_MODE;
 }
 
 // ── WiFi STA ──────────────────────────────────────────────────────────────────
 bool connectWiFi(const String &ssid, const String &pass) {
   Serial.printf("[WiFi] Connecting to %s", ssid.c_str());
+  ledMode = LED_MEDIUM;
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid.c_str(), pass.c_str());
 
@@ -523,14 +569,19 @@ bool connectWiFi(const String &ssid, const String &pass) {
   while (WiFi.status() != WL_CONNECTED) {
     if (millis() - t > WIFI_CONNECT_TIMEOUT) {
       Serial.println("\n[WiFi] Timeout");
+      ledMode = LED_OFF;
       return false;
     }
-    delay(400);
-    Serial.print(".");
-    digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+    // Keep LED updating during blocking wait
+    unsigned long now = millis();
+    if (now - ledLastMs >= 300) {
+      ledLastMs = now; ledState = !ledState;
+      digitalWrite(LED_PIN, ledState);
+    }
+    delay(50);
+    if ((millis() - t) % 400 < 50) Serial.print(".");
   }
   Serial.printf("\n[WiFi] Connected — IP: %s\n", WiFi.localIP().toString().c_str());
-  digitalWrite(LED_PIN, HIGH);
   return true;
 }
 
@@ -538,6 +589,8 @@ void ensureWiFi() {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("[WiFi] Reconnecting…");
     connectWiFi(savedSSID, savedPass);
+    // Restore LED to correct tracking state after reconnect
+    ledMode = gpsReady ? LED_PULSE : LED_RAPID;
   }
 }
 
@@ -645,10 +698,10 @@ void postLocation() {
       gps.location.lat(), gps.location.lng(),
       gps.satellites.isValid() ? (int)gps.satellites.value() : 0,
       gps.speed.isValid() ? gps.speed.kmph() : 0.0f);
-    digitalWrite(LED_PIN, HIGH);
+    ledMode = LED_PULSE;   // GPS locked + sending OK
   } else {
     Serial.printf("[POST] FAIL HTTP %d\n", code);
-    digitalWrite(LED_PIN, LOW);
+    ledMode = LED_RAPID;   // back to searching state on send failure
   }
   http.end();
 }
@@ -672,6 +725,7 @@ void setup() {
     startAP();
   } else if (savedSSID.length() > 0 && connectWiFi(savedSSID, savedPass)) {
     appState = TRACKING_MODE;
+    ledMode   = LED_RAPID;   // rapid flash until GPS locks
     Serial.printf("[APP] Tracking mode — key prefix: %s…\n", apiKey.substring(0, 8).c_str());
     Serial.println("[APP] Tip: hold BOOT button 3 s to return to setup mode");
     pingServer();
@@ -701,15 +755,14 @@ void loop() {
   if (appState == SETUP_MODE) {
     dnsServer.processNextRequest();
     webServer.handleClient();
-
-    static unsigned long ledMs = 0;
-    if (millis() - ledMs > 800) { ledMs = millis(); digitalWrite(LED_PIN, !digitalRead(LED_PIN)); }
+    updateLed();
 
     if (WiFi.status() == WL_CONNECTED) {
       Serial.println("[APP] Connected via web UI — switching to tracking mode");
       webServer.stop();
       dnsServer.stop();
       appState = TRACKING_MODE;
+      ledMode  = LED_RAPID;   // rapid flash until GPS locks
       pingServer();
     }
     return;
@@ -727,6 +780,8 @@ void loop() {
   } else {
     bootHoldMs = 0;
   }
+
+  updateLed();
 
   unsigned long now = millis();
 
