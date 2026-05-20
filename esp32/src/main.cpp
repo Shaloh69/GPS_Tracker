@@ -247,6 +247,7 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
   #toast.ok{border-color:rgba(34,197,94,.4)}
   #toast.err{border-color:rgba(239,68,68,.4)}
   .reset-link{text-align:center;font-size:12px;color:#475569;cursor:pointer;text-decoration:underline;text-underline-offset:3px}
+  .chrome-hint{font-size:11px;color:#475569;text-align:center;margin-top:10px;line-height:1.5}
   .reset-link:hover{color:#EF4444}
 </style>
 </head>
@@ -309,6 +310,7 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
         <code id="apiKeyText" class="key-val">Loading...</code>
       </div>
       <button class="btn-dl" onclick="showDlModal()">&#11015; Download QR Code</button>
+      <p class="chrome-hint">Using a captive portal? Open <strong>Chrome</strong> and go to <strong>192.168.4.1</strong> first, then download.</p>
     </div>
   </div>
 
@@ -322,7 +324,7 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
       </div>
       <div class="modal-row">
         <button class="btn-cancel" onclick="closeDlModal()">Cancel</button>
-        <button class="btn-dl-confirm" onclick="doDownloadQR()">&#11015; Download PNG</button>
+        <a class="btn-dl-confirm" href="/qr.bmp" onclick="closeDlModal()">&#11015; Download QR Image</a>
       </div>
     </div>
   </div>
@@ -330,11 +332,9 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
   <div class="reset-link" onclick="resetDevice()">Reset all saved credentials</div>
 </div>
 <div id="toast"></div>
-<canvas id="qrCv" style="display:none"></canvas>
 
 <script>
   var selectedSSID='';
-  var qrCvReady=false;
   async function pollStatus(){
     try{
       var r=await fetch('/status'),d=await r.json();
@@ -400,30 +400,11 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
   function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
   function showDlModal(){document.getElementById('dlModal').classList.add('show');}
   function closeDlModal(){document.getElementById('dlModal').classList.remove('show');}
-  function doDownloadQR(){
-    closeDlModal();
-    if(!qrCvReady){toast('QR not ready — wait a moment and try again','err');return;}
-    var a=document.createElement('a');
-    a.href=document.getElementById('qrCv').toDataURL('image/png');
-    a.download='TraceX_DeviceQR.png';
-    document.body.appendChild(a);a.click();document.body.removeChild(a);
-  }
   var toastTimer;
   function toast(msg,type){
     var el=document.getElementById('toast');el.textContent=msg;el.className='show '+(type||'');
     clearTimeout(toastTimer);toastTimer=setTimeout(function(){el.className='';},3500);
   }
-  // Pre-render QR to canvas using fillRect (never taints canvas, unlike drawImage(svgImg))
-  fetch('/qr.svg').then(function(r){return r.text();}).then(function(t){
-    var m=t.match(/svg[^>]*width="(\d+)"/);var sz=m?+m[1]:270;
-    var cv=document.getElementById('qrCv');cv.width=sz;cv.height=sz;
-    var ctx=cv.getContext('2d');
-    ctx.fillStyle='#fff';ctx.fillRect(0,0,sz,sz);
-    ctx.fillStyle='#000';
-    var re=/<rect x="(\d+)" y="(\d+)" width="\d+" height="\d+"\/>/g,md;
-    while((md=re.exec(t))!==null)ctx.fillRect(+md[1],+md[2],6,6);
-    qrCvReady=true;
-  }).catch(function(){});
   (async function(){
     await pollStatus();
     try{
@@ -484,6 +465,78 @@ void handleQRSvg() {
 
   webServer.sendContent(F("</g></svg>"));
   webServer.sendContent("");  // end chunked
+}
+
+// ── QR code BMP download (/qr.bmp) ───────────────────────────────────────────
+// 1-bit monochrome BMP (~9.6 KB). No JS canvas needed — Content-Disposition
+// forces the system download manager even in Android captive-portal WebView.
+void handleQRBmp() {
+  const uint8_t version    = 5;
+  const int     moduleSize = 6;
+  const int     quietZone  = 4;
+
+  uint8_t qrcodeData[qrcode_getBufferSize(version)];
+  QRCode  qrcode;
+  if (qrcode_initText(&qrcode, qrcodeData, version, ECC_LOW, apiKey.c_str()) != 0) {
+    webServer.send(500, "text/plain", "QR generation failed");
+    return;
+  }
+
+  const int imgPx     = (qrcode.size + 2 * quietZone) * moduleSize; // 270
+  const int rowBytes  = (imgPx + 7) / 8;                            // 34
+  const int rowStride = (rowBytes + 3) & ~3;                        // 36 (4-byte aligned)
+  const int pixBytes  = rowStride * imgPx;                          // 9720
+  const int fileSize  = 14 + 40 + 8 + pixBytes;                    // 9782
+
+  // Combined file header (14) + DIB header (40) + colour table (8) = 62 bytes
+  uint8_t hdr[62];
+  memset(hdr, 0, 62);
+  hdr[0]='B'; hdr[1]='M';
+  hdr[2]=fileSize&0xFF;       hdr[3]=(fileSize>>8)&0xFF;
+  hdr[4]=(fileSize>>16)&0xFF; hdr[5]=(fileSize>>24)&0xFF;
+  hdr[10]=62;                   // pixel data offset
+  hdr[14]=40;                   // DIB header size
+  hdr[18]=imgPx&0xFF; hdr[19]=(imgPx>>8)&0xFF;  // width
+  hdr[22]=imgPx&0xFF; hdr[23]=(imgPx>>8)&0xFF;  // height (positive = bottom-up)
+  hdr[26]=1; hdr[28]=1;         // planes=1, bpp=1
+  hdr[34]=pixBytes&0xFF;       hdr[35]=(pixBytes>>8)&0xFF;
+  hdr[36]=(pixBytes>>16)&0xFF; hdr[37]=(pixBytes>>24)&0xFF;
+  hdr[38]=0x13; hdr[39]=0x0B;  // X ppm (~72 DPI)
+  hdr[42]=0x13; hdr[43]=0x0B;  // Y ppm
+  hdr[46]=2;                    // colours used
+  // Colour table: index 0 = black (0,0,0,0), index 1 = white
+  hdr[58]=0xFF; hdr[59]=0xFF; hdr[60]=0xFF;
+
+  webServer.sendHeader("Content-Disposition",
+    "attachment; filename=\"TraceX_DeviceQR.bmp\"");
+  webServer.setContentLength(fileSize);
+  webServer.send(200, "image/bmp", "");
+
+  WiFiClient client = webServer.client();
+  client.write(hdr, 62);
+
+  // Rows are stored bottom-to-top in BMP
+  uint8_t row[36];
+  for (int y = imgPx - 1; y >= 0; y--) {
+    memset(row, 0xFF, rowStride); // default all-white
+    for (int b = 0; b < rowBytes; b++) {
+      uint8_t byte = 0xFF;
+      for (int i = 7; i >= 0; i--) {
+        int px = b * 8 + (7 - i);
+        if (px < imgPx) {
+          int qrX = px / moduleSize - quietZone;
+          int qrY = y  / moduleSize - quietZone;
+          if (qrX >= 0 && qrX < (int)qrcode.size &&
+              qrY >= 0 && qrY < (int)qrcode.size &&
+              qrcode_getModule(&qrcode, qrX, qrY)) {
+            byte &= ~(1 << i); // dark → bit=0 → colour index 0 (black)
+          }
+        }
+      }
+      row[b] = byte;
+    }
+    client.write(row, rowStride);
+  }
 }
 
 // ── Web server handlers ───────────────────────────────────────────────────────
@@ -579,6 +632,7 @@ void startAP() {
   webServer.on("/status", HTTP_GET,  handleStatus);
   webServer.on("/config", HTTP_GET,  handleConfig);
   webServer.on("/qr.svg", HTTP_GET,  handleQRSvg);
+  webServer.on("/qr.bmp", HTTP_GET,  handleQRBmp);
   webServer.on("/save",   HTTP_POST, handleSave);
   webServer.on("/reset",  HTTP_POST, handleReset);
   webServer.onNotFound(handleCaptive);
