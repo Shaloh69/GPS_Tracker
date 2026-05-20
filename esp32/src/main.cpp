@@ -400,24 +400,34 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
   function closeDlModal(){document.getElementById('dlModal').classList.remove('show');}
   function doDownloadQR(){
     closeDlModal();
-    var img=new Image();
-    img.crossOrigin='anonymous';
-    img.onload=function(){
-      var c=document.createElement('canvas');
-      c.width=img.naturalWidth||216;c.height=img.naturalHeight||216;
-      var ctx=c.getContext('2d');
-      ctx.fillStyle='#ffffff';ctx.fillRect(0,0,c.width,c.height);
-      ctx.drawImage(img,0,0);
-      var a=document.createElement('a');
-      a.href=c.toDataURL('image/png');
-      a.download='tracex-device-qr.png';
-      document.body.appendChild(a);a.click();document.body.removeChild(a);
-    };
-    img.onerror=function(){
-      var a=document.createElement('a');a.href='/qr.svg';a.download='tracex-device-qr.svg';
-      document.body.appendChild(a);a.click();document.body.removeChild(a);
-    };
-    img.src='/qr.svg?t='+Date.now();
+    fetch('/qr.svg?t='+Date.now())
+      .then(function(r){return r.blob();})
+      .then(function(blob){
+        var url=URL.createObjectURL(blob);
+        var img=new Image();
+        img.onload=function(){
+          var c=document.createElement('canvas');
+          c.width=img.naturalWidth||270;c.height=img.naturalHeight||270;
+          var ctx=c.getContext('2d');
+          ctx.fillStyle='#ffffff';ctx.fillRect(0,0,c.width,c.height);
+          ctx.drawImage(img,0,0);
+          URL.revokeObjectURL(url);
+          var a=document.createElement('a');
+          try{a.href=c.toDataURL('image/png');}catch(e){a.href=URL.createObjectURL(blob);a.download='tracex-device-qr.svg';document.body.appendChild(a);a.click();document.body.removeChild(a);return;}
+          a.download='tracex-device-qr.png';
+          document.body.appendChild(a);a.click();document.body.removeChild(a);
+        };
+        img.onerror=function(){
+          URL.revokeObjectURL(url);
+          var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='tracex-device-qr.svg';
+          document.body.appendChild(a);a.click();document.body.removeChild(a);
+        };
+        img.src=url;
+      })
+      .catch(function(){
+        var a=document.createElement('a');a.href='/qr.svg';a.download='tracex-device-qr.svg';
+        document.body.appendChild(a);a.click();document.body.removeChild(a);
+      });
   }
   var toastTimer;
   function toast(msg,type){
