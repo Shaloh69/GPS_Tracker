@@ -95,6 +95,25 @@ class TrackerService extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Called every 5 s — marks devices whose lastSeen is > 35 s ago as offline
+  /// so the counter stays accurate without waiting for a WebSocket offline event.
+  void refreshOnlineStatus() {
+    final now = DateTime.now();
+    bool changed = false;
+    for (int i = 0; i < _devices.length; i++) {
+      final d = _devices[i];
+      if (d.isOnline) {
+        final stale = d.lastSeen == null ||
+            now.difference(d.lastSeen!) > const Duration(seconds: 35);
+        if (stale) {
+          _devices[i] = d.copyWith(isOnline: false);
+          changed = true;
+        }
+      }
+    }
+    if (changed) notifyListeners();
+  }
+
   // ── Location history ──────────────────────────────────────────────────────
   Future<List<DeviceLocation>> fetchHistory(
     String deviceId, {

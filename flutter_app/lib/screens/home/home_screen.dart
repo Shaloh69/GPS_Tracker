@@ -131,6 +131,8 @@ class _HomeScreenState extends State<HomeScreen>
       if (!socket.connected && auth.accessToken != null) {
         socket.connect(auth.accessToken!);
       }
+      // Mark devices offline if last_seen > 35 s ago
+      context.read<TrackerService>().refreshOnlineStatus();
     });
   }
 
@@ -319,11 +321,9 @@ class _HomeScreenState extends State<HomeScreen>
             Expanded(
               child: Stack(
                 children: [
-                  // Map
+                  // Map — always rendered; empty state is an overlay on top
                   if (tracker.loading)
                     const Center(child: CircularProgressIndicator(color: AppColors.blue500))
-                  else if (located.isEmpty)
-                    _EmptyMap(hasDevices: tracker.devices.isNotEmpty)
                   else
                     _LiveMap(
                       located: located,
@@ -333,6 +333,10 @@ class _HomeScreenState extends State<HomeScreen>
                       userPosition: _userPosition,
                       onMarkerTap: _showDeviceModal,
                     ),
+
+                  // Transparent "no devices / no fix" overlay
+                  if (!tracker.loading && located.isEmpty)
+                    _EmptyOverlay(hasDevices: tracker.devices.isNotEmpty),
 
                   // Off-screen directional arrows
                   if (located.isNotEmpty)
@@ -443,27 +447,40 @@ class _TopBar extends StatelessWidget {
   }
 }
 
-// ── Empty map placeholder ─────────────────────────────────────────────────────
+// ── Empty state overlay (sits on top of the always-visible map) ───────────────
 
-class _EmptyMap extends StatelessWidget {
+class _EmptyOverlay extends StatelessWidget {
   final bool hasDevices;
-  const _EmptyMap({required this.hasDevices});
+  const _EmptyOverlay({required this.hasDevices});
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      color: const Color(0xFF0B1426),
+    return IgnorePointer(
       child: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.map_outlined, size: 56, color: AppColors.blue800),
-            const SizedBox(height: 14),
-            Text(
-              hasDevices ? 'Waiting for GPS fix…' : 'No devices registered',
-              style: const TextStyle(color: AppColors.blue600, fontSize: 15),
-            ),
-          ],
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 14),
+          decoration: BoxDecoration(
+            color: Colors.black.withAlpha(150),
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: Colors.white.withAlpha(25)),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                hasDevices ? Icons.gps_not_fixed : Icons.devices_other_rounded,
+                size: 20,
+                color: AppColors.blue400,
+              ),
+              const SizedBox(width: 10),
+              Text(
+                hasDevices ? 'Waiting for GPS fix…' : 'No devices registered',
+                style: const TextStyle(
+                    color: Colors.white70, fontSize: 13,
+                    fontWeight: FontWeight.w500),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -503,16 +520,26 @@ class _LiveMap extends StatelessWidget {
     final mHeight     = iconSize + (labelFont + 7) + ringSize * 0.3;
     final mWidth      = (100 * markerScale).clamp(40.0, 130.0);
 
+    // Default view when no devices have a location yet
+    final MapOptions mapOptions = points.isEmpty
+        ? MapOptions(
+            initialCenter: userPosition != null
+                ? LatLng(userPosition!.latitude, userPosition!.longitude)
+                : const LatLng(10.3157, 123.8854), // fallback
+            initialZoom: userPosition != null ? 14 : 10,
+          )
+        : isSingle
+            ? MapOptions(initialCenter: points.first, initialZoom: 15)
+            : MapOptions(
+                initialCameraFit: CameraFit.bounds(
+                  bounds: LatLngBounds.fromPoints(points),
+                  padding: const EdgeInsets.fromLTRB(48, 48, 48, 120),
+                ),
+              );
+
     return FlutterMap(
       mapController: mapController,
-      options: isSingle
-          ? MapOptions(initialCenter: points.first, initialZoom: 15)
-          : MapOptions(
-              initialCameraFit: CameraFit.bounds(
-                bounds: LatLngBounds.fromPoints(points),
-                padding: const EdgeInsets.fromLTRB(48, 48, 48, 120),
-              ),
-            ),
+      options: mapOptions,
       children: [
         TileLayer(
           urlTemplate:
@@ -1059,15 +1086,20 @@ class _DeviceRow extends StatelessWidget {
                           ),
                         ],
                       ),
-                      const SizedBox(height: 3),
+                      const SizedBox(height: 2),
+                      if (loc != null)
+                        Text(
+                          '${loc.lat.toStringAsFixed(5)}, ${loc.lng.toStringAsFixed(5)}',
+                          style: const TextStyle(color: AppColors.blue600, fontSize: 10),
+                          overflow: TextOverflow.ellipsis,
+                        ),
                       Text(
-                        loc != null
-                            ? '${loc.lat.toStringAsFixed(6)}, '
-                              '${loc.lng.toStringAsFixed(6)}  ·  '
-                              '${_timeAgo(device.lastSeen)}'
-                            : _timeAgo(device.lastSeen),
-                        style: const TextStyle(color: AppColors.blue600, fontSize: 10),
-                        overflow: TextOverflow.ellipsis,
+                        'Last seen  ${_timeAgo(device.lastSeen)}',
+                        style: TextStyle(
+                            color: device.isOnline
+                                ? AppColors.green.withAlpha(160)
+                                : AppColors.blue700,
+                            fontSize: 10),
                       ),
                     ],
                   ),
