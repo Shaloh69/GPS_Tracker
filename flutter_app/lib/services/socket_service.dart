@@ -10,12 +10,19 @@ class SocketService extends ChangeNotifier {
   io.Socket? _socket;
   bool _connected = false;
 
+  // All device rooms registered so far — rejoined automatically on every connect
+  final Set<String> _rooms = {};
+
   SocketService(this._tracker);
 
   bool get connected => _connected;
 
   void connect(String accessToken) {
-    if (_socket != null) return;
+    if (_socket != null) {
+      // Socket already created — if it dropped, tell it to reconnect
+      if (!_connected) _socket!.connect();
+      return;
+    }
 
     _socket = io.io(
       kSocketUrl,
@@ -30,36 +37,42 @@ class SocketService extends ChangeNotifier {
       ..onConnect((_) {
         _connected = true;
         notifyListeners();
-        debugPrint('[WS] Connected');
+        debugPrint('[WS] Connected — rejoining ${_rooms.length} rooms');
+        // Rejoin all rooms on EVERY connect (initial connect AND reconnect)
+        for (final id in _rooms) {
+          _socket?.emit('join:device', id);
+        }
       })
       ..onDisconnect((_) {
         _connected = false;
         notifyListeners();
         debugPrint('[WS] Disconnected');
       })
-      ..onConnectError((e) => debugPrint('[WS] Error: $e'))
+      ..onConnectError((e) => debugPrint('[WS] Connect error: $e'))
       ..on('location:update', _onLocationUpdate)
       ..on('device:status', _onDeviceStatus)
       ..connect();
   }
 
-  // Join a single device room
+  // Track the room; emit immediately if already connected, or wait for onConnect
   void joinDevice(String deviceId) {
-    _socket?.emit('join:device', deviceId);
-    debugPrint('[WS] Joined device:$deviceId');
+    _rooms.add(deviceId);
+    if (_connected) {
+      _socket?.emit('join:device', deviceId);
+      debugPrint('[WS] Joined device:$deviceId');
+    }
   }
 
-  // Join all device rooms at once (home screen)
   void joinAll(List<String> deviceIds) {
     for (final id in deviceIds) {
-      _socket?.emit('join:device', id);
+      _rooms.add(id);
+      if (_connected) _socket?.emit('join:device', id);
     }
-    if (deviceIds.isNotEmpty) {
-      debugPrint('[WS] Joined ${deviceIds.length} device rooms');
-    }
+    debugPrint('[WS] joinAll — ${deviceIds.length} ids, connected: $_connected');
   }
 
   void leaveDevice(String deviceId) {
+    _rooms.remove(deviceId);
     _socket?.emit('leave:device', deviceId);
     debugPrint('[WS] Left device:$deviceId');
   }
@@ -69,6 +82,7 @@ class SocketService extends ChangeNotifier {
     _socket?.dispose();
     _socket = null;
     _connected = false;
+    _rooms.clear();
     notifyListeners();
   }
 
@@ -88,7 +102,7 @@ class SocketService extends ChangeNotifier {
     try {
       final data     = raw as Map<dynamic, dynamic>;
       final deviceId = data['deviceId'] as String;
-      final isOnline = data['isOnline'] as bool? ?? false;
+      final isOnline = data['isOnline'] == true;
       _tracker.markDeviceOnline(deviceId, isOnline);
     } catch (e) {
       debugPrint('[WS] device:status parse error: $e');

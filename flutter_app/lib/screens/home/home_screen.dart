@@ -113,14 +113,10 @@ class _HomeScreenState extends State<HomeScreen>
       if (!mounted) return;
       final socket = context.read<SocketService>();
       final auth   = context.read<AuthService>();
+      // SocketService.connect() handles reconnecting the socket;
+      // rooms are rejoined automatically inside its onConnect callback.
       if (!socket.connected && auth.accessToken != null) {
         socket.connect(auth.accessToken!);
-        Future.delayed(const Duration(milliseconds: 700), () {
-          if (!mounted) return;
-          context.read<SocketService>().joinAll(
-            context.read<TrackerService>().devices.map((d) => d.id).toList(),
-          );
-        });
       }
     });
   }
@@ -133,12 +129,10 @@ class _HomeScreenState extends State<HomeScreen>
     final socket  = context.read<SocketService>();
     await tracker.fetchDevices();
     if (!mounted) return;
-    if (!socket.connected && auth.accessToken != null) {
-      socket.connect(auth.accessToken!);
-      await Future.delayed(const Duration(milliseconds: 800));
-      if (!mounted) return;
-    }
+    // Register rooms BEFORE connecting — SocketService sends join:device events
+    // inside onConnect, so there is no race against the handshake delay.
     socket.joinAll(tracker.devices.map((d) => d.id).toList());
+    if (auth.accessToken != null) socket.connect(auth.accessToken!);
   }
 
   // ── Follow toggle ─────────────────────────────────────────────────────────
@@ -167,12 +161,13 @@ class _HomeScreenState extends State<HomeScreen>
   Future<void> _addDevice() async {
     final tracker = context.read<TrackerService>();
     final socket  = context.read<SocketService>();
-    final added = await Navigator.push<bool>(
+    final added   = await Navigator.push<bool>(
       context,
       MaterialPageRoute(builder: (_) => const AddDeviceScreen()),
     );
     if (added == true && mounted) {
       await tracker.fetchDevices();
+      // joinAll adds new rooms; if connected, emits immediately
       socket.joinAll(tracker.devices.map((d) => d.id).toList());
     }
   }
@@ -510,23 +505,12 @@ class _LiveMap extends StatelessWidget {
           }).toList(),
         ),
 
-        // Pulsing ring layer — aligned CENTER so ring is at exact GPS coord
-        MarkerLayer(
-          markers: located.map((d) {
-            final loc = d.latestLocation!;
-            final ringColor =
-                d.isOnline ? AppColors.green : AppColors.blue400;
-            return Marker(
-              point: LatLng(loc.lat, loc.lng),
-              width: 48,
-              height: 48,
-              alignment: Alignment.center,
-              child: _PulseRing(color: ringColor),
-            );
-          }).toList(),
-        ),
-
-        // Pin + label markers — aligned BOTTOM-CENTER so pin tip is at GPS coord
+        // Combined pin + pulse ring markers.
+        // Marker aligned bottomCenter → bottom of widget = GPS coordinate.
+        // Stack layout (bottom = GPS coord):
+        //   • _PulseRing in SizedBox(44,44) with bottom:0 → ring center is
+        //     22 px above GPS coord, which is exactly the pin-head centre.
+        //   • Column(mainAxisAlignment.end) → icon tip at GPS coord.
         MarkerLayer(
           markers: located.asMap().entries.map((entry) {
             final i      = entry.key;
@@ -538,59 +522,73 @@ class _LiveMap extends StatelessWidget {
             return Marker(
               point: LatLng(loc.lat, loc.lng),
               width: 120,
-              // 58px = label(~22px) + gap(4px) + icon(32px).
-              // mainAxisAlignment.end pins the column's bottom to the marker
-              // bottom, so alignment:bottomCenter lands the pin tip on the coord.
-              height: 58,
+              // label(22) + gap(4) + icon(32) = 58, +14 breathing room = 72
+              height: 72,
               alignment: Alignment.bottomCenter,
               child: GestureDetector(
                 onTap: () => Navigator.push(
                   context,
                   MaterialPageRoute(
-                    builder: (_) =>
-                        DeviceDetailScreen(deviceId: device.id),
+                    builder: (_) => DeviceDetailScreen(deviceId: device.id),
                   ),
                 ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.max,
-                  mainAxisAlignment: MainAxisAlignment.end,
+                child: Stack(
+                  alignment: Alignment.bottomCenter,
                   children: [
-                    // Device label chip
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 3),
-                      decoration: BoxDecoration(
-                        color: pinColor.withAlpha(220),
-                        borderRadius: BorderRadius.circular(8),
-                        boxShadow: [
-                          BoxShadow(
-                            color: pinColor.withAlpha(100),
-                            blurRadius: 6,
-                            offset: const Offset(0, 2),
-                          ),
-                        ],
-                      ),
-                      child: Text(
-                        device.name,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 10,
-                          fontWeight: FontWeight.w700,
+                    // Pulse ring: bottom edge at GPS coord → center at pin head
+                    Positioned(
+                      bottom: 0,
+                      left: 0,
+                      right: 0,
+                      child: Center(
+                        child: SizedBox(
+                          width: 44,
+                          height: 44,
+                          child: _PulseRing(color: pinColor),
                         ),
-                        overflow: TextOverflow.ellipsis,
                       ),
                     ),
-                    const SizedBox(height: 4),
-                    // Pin icon — tip at very bottom of the 32px bounding box
-                    Icon(Icons.location_on_rounded,
-                        color: pinColor, size: 32),
+                    // Label + pin — content pinned to bottom, tip at GPS coord
+                    Column(
+                      mainAxisSize: MainAxisSize.max,
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 3),
+                          decoration: BoxDecoration(
+                            color: pinColor.withAlpha(220),
+                            borderRadius: BorderRadius.circular(8),
+                            boxShadow: [
+                              BoxShadow(
+                                color: pinColor.withAlpha(100),
+                                blurRadius: 6,
+                                offset: const Offset(0, 2),
+                              ),
+                            ],
+                          ),
+                          child: Text(
+                            device.name,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 10,
+                              fontWeight: FontWeight.w700,
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Icon(Icons.location_on_rounded,
+                            color: pinColor, size: 32),
+                      ],
+                    )
+                        .animate(delay: (i * 80).ms)
+                        .scale(
+                            begin: const Offset(0, 0),
+                            duration: 420.ms,
+                            curve: Curves.elasticOut),
                   ],
-                )
-                    .animate(delay: (i * 80).ms)
-                    .scale(
-                        begin: const Offset(0, 0),
-                        duration: 420.ms,
-                        curve: Curves.elasticOut),
+                ),
               ),
             );
           }).toList(),
@@ -637,8 +635,8 @@ class _PulseRingState extends State<_PulseRing>
     return AnimatedBuilder(
       animation: _ctrl,
       builder: (_, __) => Container(
-        width: 48 * _scale.value,
-        height: 48 * _scale.value,
+        width: 44 * _scale.value,
+        height: 44 * _scale.value,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
           border: Border.all(

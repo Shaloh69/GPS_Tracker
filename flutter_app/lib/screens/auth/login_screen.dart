@@ -83,12 +83,26 @@ class _LoginScreenState extends State<LoginScreen> {
                           size: 30, color: Colors.white),
                     ),
                     const SizedBox(height: 16),
-                    const Text('TraceX',
-                        style: TextStyle(
-                            fontSize: 34,
-                            fontWeight: FontWeight.w700,
-                            color: Colors.white,
-                            letterSpacing: -0.5)),
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        const Text('TraceX',
+                            style: TextStyle(
+                                fontSize: 34,
+                                fontWeight: FontWeight.w700,
+                                color: Colors.white,
+                                letterSpacing: -0.5)),
+                        const SizedBox(width: 8),
+                        const Padding(
+                          padding: EdgeInsets.only(bottom: 6),
+                          child: Text('v1.0.9',
+                              style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w500,
+                                  color: AppColors.blue400)),
+                        ),
+                      ],
+                    ),
                     const SizedBox(height: 4),
                     Text('Sign in to monitor your devices',
                         style: TextStyle(
