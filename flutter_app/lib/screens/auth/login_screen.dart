@@ -95,7 +95,7 @@ class _LoginScreenState extends State<LoginScreen> {
                         const SizedBox(width: 8),
                         const Padding(
                           padding: EdgeInsets.only(bottom: 6),
-                          child: Text('v1.0.10',
+                          child: Text('v1.0.11',
                               style: TextStyle(
                                   fontSize: 13,
                                   fontWeight: FontWeight.w500,

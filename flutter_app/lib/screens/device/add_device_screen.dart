@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:provider/provider.dart';
 import '../../services/tracker_service.dart';
@@ -15,8 +16,10 @@ class AddDeviceScreen extends StatefulWidget {
 
 class _AddDeviceScreenState extends State<AddDeviceScreen> {
   final MobileScannerController _scanner = MobileScannerController();
-  bool _scanned     = false;
-  bool _registering = false;
+  final ImagePicker _picker = ImagePicker();
+  bool _scanned      = false;
+  bool _registering  = false;
+  bool _analyzingImg = false;
 
   @override
   void dispose() {
@@ -24,19 +27,61 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
     super.dispose();
   }
 
+  // ── Camera scan ───────────────────────────────────────────────────────────
+
   void _onDetect(BarcodeCapture capture) {
     if (_scanned || _registering) return;
     final raw = capture.barcodes.isNotEmpty
         ? capture.barcodes.first.rawValue
         : null;
     if (raw == null) return;
+    _handleRaw(raw);
+  }
 
-    // Must be exactly 64 lowercase hex chars (ESP32 hardware-RNG key)
+  // ── Gallery pick + analyze ────────────────────────────────────────────────
+
+  Future<void> _pickFromGallery() async {
+    if (_scanned || _registering || _analyzingImg) return;
+
+    XFile? file;
+    try {
+      file = await _picker.pickImage(source: ImageSource.gallery);
+    } catch (_) {
+      if (mounted) {
+        showToast(context, 'Could not open gallery', type: ToastType.error);
+      }
+      return;
+    }
+    if (file == null) return; // user cancelled
+
+    setState(() => _analyzingImg = true);
+    try {
+      final capture = await _scanner.analyzeImage(file.path);
+      if (!mounted) return;
+      final raw = (capture?.barcodes.isNotEmpty ?? false)
+          ? capture!.barcodes.first.rawValue
+          : null;
+      if (raw == null) {
+        showToast(context, 'No QR code found in image', type: ToastType.error);
+        return;
+      }
+      _handleRaw(raw);
+    } catch (_) {
+      if (mounted) {
+        showToast(context, 'Failed to read image', type: ToastType.error);
+      }
+    } finally {
+      if (mounted) setState(() => _analyzingImg = false);
+    }
+  }
+
+  // ── Shared logic ──────────────────────────────────────────────────────────
+
+  void _handleRaw(String raw) {
     if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(raw)) {
       showToast(context, 'Not a valid TraceX QR code', type: ToastType.error);
       return;
     }
-
     setState(() => _scanned = true);
     _scanner.stop();
     _showNameDialog(raw);
@@ -107,7 +152,6 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
     if (confirmed == true && mounted) {
       await _register(scannedKey, nameCtrl.text.trim());
     } else {
-      // User cancelled — resume scanning
       if (mounted) setState(() => _scanned = false);
       _scanner.start();
     }
@@ -127,26 +171,22 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
     } on ApiException catch (e) {
       if (mounted) {
         showToast(context, e.message, type: ToastType.error);
-        setState(() {
-          _scanned     = false;
-          _registering = false;
-        });
+        setState(() { _scanned = false; _registering = false; });
         _scanner.start();
       }
     } catch (_) {
       if (mounted) {
         showToast(context, 'Could not reach server. Check your connection.',
             type: ToastType.error);
-        setState(() {
-          _scanned     = false;
-          _registering = false;
-        });
+        setState(() { _scanned = false; _registering = false; });
         _scanner.start();
       }
     } finally {
       if (mounted) setState(() => _registering = false);
     }
   }
+
+  // ── UI ────────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
@@ -203,6 +243,22 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
                         child: CustomPaint(painter: _ScanOverlay()),
                       ),
                     ),
+                    // Analyzing image overlay
+                    if (_analyzingImg)
+                      Container(
+                        color: Colors.black54,
+                        child: const Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              CircularProgressIndicator(color: AppColors.blue400),
+                              SizedBox(height: 14),
+                              Text('Reading QR from image…',
+                                  style: TextStyle(color: Colors.white70)),
+                            ],
+                          ),
+                        ),
+                      ),
                     // Registering overlay
                     if (_registering)
                       Container(
@@ -216,12 +272,34 @@ class _AddDeviceScreenState extends State<AddDeviceScreen> {
                 ),
               ),
 
+              // Upload from gallery button
+              Padding(
+                padding: const EdgeInsets.fromLTRB(24, 16, 24, 4),
+                child: SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: (_scanned || _registering || _analyzingImg)
+                        ? null
+                        : _pickFromGallery,
+                    icon: const Icon(Icons.photo_library_outlined, size: 18),
+                    label: const Text('Upload QR from Gallery'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: AppColors.blue300,
+                      side: const BorderSide(color: AppColors.blue700),
+                      padding: const EdgeInsets.symmetric(vertical: 13),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12)),
+                    ),
+                  ),
+                ),
+              ),
+
               // Instruction footer
               Padding(
-                padding: const EdgeInsets.fromLTRB(24, 20, 24, 28),
+                padding: const EdgeInsets.fromLTRB(24, 8, 24, 28),
                 child: Text(
                   'Connect to your ESP32 hotspot (GPS-Tracker-Setup),\n'
-                  'open http://192.168.4.1, then scan the QR shown there.',
+                  'open http://192.168.4.1, then scan or upload the QR shown there.',
                   textAlign: TextAlign.center,
                   style: TextStyle(
                       color: Colors.white.withAlpha(115), fontSize: 12),
