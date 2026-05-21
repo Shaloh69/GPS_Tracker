@@ -857,6 +857,7 @@ void postLocation() {
 
   int code = http.POST(payload);
   if (code == 201) {
+    deviceRegistered = true;
     Serial.printf("[POST] ✓ lat=%.6f lng=%.6f  sats=%d  spd=%.1fkm/h  hdop=%.2f  alt=%.1fm\n",
       gps.location.lat(), gps.location.lng(),
       gps.satellites.isValid() ? (int)gps.satellites.value() : 0,
@@ -864,6 +865,18 @@ void postLocation() {
       gps.hdop.isValid()     ? gps.hdop.hdop()        : 99.0f,
       gps.altitude.isValid() ? gps.altitude.meters()  : 0.0f);
     ledMode = LED_PULSE;
+  } else if (code == 401 || code == 404) {
+    http.end();
+    if (deviceRegistered) {
+      Serial.printf("[POST] ✗ HTTP %d — device removed from app, clearing NVS & restarting\n", code);
+      clearPrefs();
+      delay(500);
+      ESP.restart();
+    } else {
+      Serial.printf("[POST] ✗ HTTP %d — not registered yet, scan QR in TraceX app to pair\n", code);
+      ledMode = LED_SLOW;
+    }
+    return;
   } else {
     String body = http.getString();
     Serial.printf("[POST] ✗ HTTP %d  body: %.80s\n", code, body.c_str());
