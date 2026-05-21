@@ -31,6 +31,15 @@ class ApiService {
     return _parse(res);
   }
 
+  Future<Map<String, dynamic>> patch(
+      String path, Map<String, dynamic> body) async {
+    final res = await http
+        .patch(Uri.parse('$kBaseUrl$path'),
+            headers: _headers, body: jsonEncode(body))
+        .timeout(_timeout);
+    return _parse(res);
+  }
+
   Future<Map<String, dynamic>> delete(String path) async {
     final res = await http
         .delete(Uri.parse('$kBaseUrl$path'), headers: _headers)

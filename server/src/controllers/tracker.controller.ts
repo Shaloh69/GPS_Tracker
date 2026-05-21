@@ -119,6 +119,30 @@ export async function getDevice(req: AuthRequest, res: Response): Promise<void> 
   }
 }
 
+export async function updateDevice(req: AuthRequest, res: Response): Promise<void> {
+  const { deviceId } = req.params;
+  const { name } = req.body;
+  if (!name?.trim()) {
+    res.status(400).json({ success: false, message: 'name is required' });
+    return;
+  }
+  try {
+    const [result] = await pool.execute<any>(
+      'UPDATE devices SET name = ? WHERE id = ? AND owner_id = ?',
+      [name.trim(), deviceId, req.user!.id]
+    );
+    if (!result.affectedRows) {
+      res.status(404).json({ success: false, message: 'Device not found' });
+      return;
+    }
+    logger.info(`[DEVICE] Renamed: id=${deviceId.slice(0, 8)}… → "${name.trim()}"`);
+    res.json({ success: true, data: { id: deviceId, name: name.trim() } });
+  } catch (err) {
+    logger.error('updateDevice error', err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+}
+
 export async function deleteDevice(req: AuthRequest, res: Response): Promise<void> {
   const { deviceId } = req.params;
   try {

@@ -4,6 +4,7 @@ import {
   createDevice,
   listDevices,
   getDevice,
+  updateDevice,
   deleteDevice,
   postLocation,
   pingDevice,
@@ -24,6 +25,7 @@ router.post(
 );
 router.get('/devices', requireAuth, listDevices);
 router.get('/devices/:deviceId', requireAuth, param('deviceId').isUUID(), getDevice);
+router.patch('/devices/:deviceId', requireAuth, param('deviceId').isUUID(), body('name').trim().notEmpty(), updateDevice);
 router.delete('/devices/:deviceId', requireAuth, param('deviceId').isUUID(), deleteDevice);
 
 // ── Device heartbeat (requires device X-Api-Key) ─────────────────────────────

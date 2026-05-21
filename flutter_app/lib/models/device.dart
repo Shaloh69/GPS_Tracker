@@ -47,13 +47,14 @@ class Device {
       );
 
   Device copyWith({
+    String? name,
     bool? isOnline,
     DeviceLocation? latestLocation,
     DateTime? lastSeen,
   }) =>
       Device(
         id:             id,
-        name:           name,
+        name:           name ?? this.name,
         isActive:       isActive,
         isOnline:       isOnline ?? this.isOnline,
         lastSeen:       lastSeen ?? this.lastSeen,

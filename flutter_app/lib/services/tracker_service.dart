@@ -56,6 +56,15 @@ class TrackerService extends ChangeNotifier {
     return res['data'] as Map<String, dynamic>;
   }
 
+  Future<void> renameDevice(String deviceId, String name) async {
+    await _api.patch('/tracker/devices/$deviceId', {'name': name});
+    final idx = _devices.indexWhere((d) => d.id == deviceId);
+    if (idx != -1) {
+      _devices[idx] = _devices[idx].copyWith(name: name);
+      notifyListeners();
+    }
+  }
+
   Future<void> deleteDevice(String deviceId) async {
     await _api.delete('/tracker/devices/$deviceId');
     _devices.removeWhere((d) => d.id == deviceId);
