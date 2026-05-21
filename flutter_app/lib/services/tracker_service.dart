@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:latlong2/latlong.dart';
 import '../models/device.dart';
 import '../models/location.dart';
 import 'api_service.dart';
@@ -10,11 +11,20 @@ class TrackerService extends ChangeNotifier {
   bool _loading = false;
   String? _error;
 
+  /// Trailing positions per device — last 20 GPS fixes kept for trail rendering.
+  final Map<String, List<LatLng>> _trails = {};
+
+  /// Id of the device whose location was most recently updated via WebSocket.
+  String? _lastUpdatedDeviceId;
+
   TrackerService(this._api);
 
-  List<Device> get devices  => _devices;
-  bool         get loading  => _loading;
-  String?      get error    => _error;
+  List<Device> get devices              => _devices;
+  bool         get loading              => _loading;
+  String?      get error                => _error;
+  String?      get lastUpdatedDeviceId  => _lastUpdatedDeviceId;
+
+  List<LatLng> getTrail(String deviceId) => _trails[deviceId] ?? const [];
 
   // ── Devices ───────────────────────────────────────────────────────────────
   Future<void> fetchDevices() async {
@@ -52,7 +62,7 @@ class TrackerService extends ChangeNotifier {
     notifyListeners();
   }
 
-  // Called by SocketService when a real-time update arrives
+  // Called by SocketService when a real-time location update arrives
   void applyLiveLocation(String deviceId, DeviceLocation location) {
     final idx = _devices.indexWhere((d) => d.id == deviceId);
     if (idx == -1) return;
@@ -61,6 +71,11 @@ class TrackerService extends ChangeNotifier {
       latestLocation: location,
       lastSeen: DateTime.now(),
     );
+    // Append to trail (keep last 20 positions)
+    final trail = _trails.putIfAbsent(deviceId, () => []);
+    trail.add(LatLng(location.lat, location.lng));
+    if (trail.length > 20) trail.removeAt(0);
+    _lastUpdatedDeviceId = deviceId;
     notifyListeners();
   }
 
