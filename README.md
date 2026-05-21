@@ -1,6 +1,6 @@
-# GPS Tracker
+# TraceX — Real-Time GPS Tracker
 
-A full-stack real-time GPS tracking system built with **ESP32**, **Node.js/TypeScript**, and **Flutter**.
+**v1.0.12** · Full-stack GPS tracking system built with **ESP32**, **Node.js/TypeScript**, and **Flutter**.
 
 ---
 
@@ -9,8 +9,8 @@ A full-stack real-time GPS tracking system built with **ESP32**, **Node.js/TypeS
 ```
 ┌─────────────────┐        HTTP POST        ┌────────────────────┐
 │   ESP32 DevKit  │ ──── X-Api-Key ───────► │  Node.js Server    │
-│  + GPS6MV2      │   /api/v1/tracker/      │  Express + MySQL   │
-│  (10 Hz, 115200)│      location           │  Socket.IO         │
+│  + NEO-6M GPS   │   /api/v1/tracker/      │  Express + MySQL   │
+│  (1 Hz / 9600)  │      location           │  Socket.IO         │
 └─────────────────┘                         └────────────────────┘
                                                       │
                                                Socket.IO event
@@ -18,9 +18,9 @@ A full-stack real-time GPS tracking system built with **ESP32**, **Node.js/TypeS
                                                       │
                                                       ▼
                                             ┌─────────────────────┐
-                                            │   Flutter App       │
-                                            │  Real-time Map View │
-                                            │  Device Dashboard   │
+                                            │   TraceX Flutter    │
+                                            │   Real-time Map     │
+                                            │   Device Dashboard  │
                                             └─────────────────────┘
 ```
 
@@ -31,8 +31,8 @@ A full-stack real-time GPS tracking system built with **ESP32**, **Node.js/TypeS
 ```
 GPS_Tracker/
 ├── server/          Node.js + TypeScript backend
-├── esp32/           PlatformIO firmware for ESP32
-└── flutter_app/     Flutter mobile dashboard
+├── esp32/           PlatformIO firmware (ESP32 + NEO-6M)
+└── flutter_app/     Flutter mobile dashboard (TraceX)
 ```
 
 ---
@@ -51,34 +51,37 @@ GPS_Tracker/
 
 ```
   GPS6MV2 Module              ESP32 DevKit (30-pin)
-  ┌───────────────┐           ┌──────────────────────┐
-  │  VCC ─────────┼───────────┼─ 3.3V (or VUSB 5V)  │
-  │  GND ─────────┼───────────┼─ GND                 │
-  │  TXD ─────────┼───────────┼─ D21 / GPIO21  (RX)  │
-  │  RXD ─────────┼───────────┼─ D22 / GPIO22  (TX)  │
-  │               │           │                      │
-  │  [GPS Antenna]│           │   [Wi-Fi Antenna]    │
-  └───────────────┘           └──────────────────────┘
+  ┌──────────────┐            ┌──────────────────────┐
+  │  VCC ────────┼────────────┼─ 3.3V (or VUSB 5V)  │
+  │  GND ────────┼────────────┼─ GND                 │
+  │  TXD ────────┼────────────┼─ GPIO21  (UART RX)   │
+  │  RXD ────────┼────────────┼─ GPIO22  (UART TX)   │
+  │  [Antenna]   │            │  [Wi-Fi Antenna]     │
+  └──────────────┘            └──────────────────────┘
 ```
 
 | GPS6MV2 Pin | ESP32 Pin | Notes |
 |---|---|---|
 | VCC | 3.3V or VUSB | Module has onboard LDO — either voltage works |
 | GND | GND | Common ground |
-| TXD | D21 (GPIO21) | GPS sends NMEA → ESP32 receives (UART RX) |
-| RXD | D22 (GPIO22) | ESP32 sends config → GPS (UART TX) |
+| TXD | GPIO21 | GPS sends NMEA → ESP32 receives (UART RX) |
+| RXD | GPIO22 | ESP32 sends config → GPS (UART TX) |
 
 ### GPS Configuration
-The firmware automatically configures the NEO-6M on boot:
-1. Switches UART to **115200 baud** (UBX-CFG-PRT)
-2. Sets measurement rate to **10 Hz / 100 ms** (UBX-CFG-RATE)
-3. Saves config to flash (UBX-CFG-CFG) — survives power cycles
+
+On boot the firmware sends UBX commands to the NEO-6M:
+1. Factory-clears saved config (UBX-CFG-CFG) to escape binary-only mode
+2. Operates at **9600 baud** (stable factory default — not saved to flash)
+3. Explicitly enables NMEA sentences: GGA, RMC, GSA, GSV
+4. Sets measurement rate to **1 Hz**
+5. Saves NMEA + rate config to module flash
 
 ---
 
 ## Server
 
 ### Tech Stack
+
 - **Runtime:** Node.js 20+
 - **Framework:** Express.js 4
 - **Language:** TypeScript 5
@@ -111,6 +114,7 @@ JWT_SECRET=your-long-random-secret
 ### API Reference
 
 #### Authentication
+
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
 | POST | `/api/v1/auth/register` | — | Create user account |
@@ -120,21 +124,30 @@ JWT_SECRET=your-long-random-secret
 | GET | `/api/v1/auth/me` | JWT | Current user profile |
 
 #### Device Management
+
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
 | POST | `/api/v1/tracker/devices` | JWT | Register ESP32 → returns `api_key` |
 | GET | `/api/v1/tracker/devices` | JWT | List your devices |
-| GET | `/api/v1/tracker/devices/:id` | JWT | Device details + latest location |
-| DELETE | `/api/v1/tracker/devices/:id` | JWT | Remove device |
+| PATCH | `/api/v1/tracker/devices/:id` | JWT | Rename device |
+| DELETE | `/api/v1/tracker/devices/:id` | JWT | Remove device (triggers ESP32 reset) |
 
 #### Location
+
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
 | **POST** | `/api/v1/tracker/location` | `X-Api-Key` | **ESP32 pushes GPS fix** |
-| GET | `/api/v1/tracker/locations/:id` | JWT | Location history (`?limit=100&from=&to=`) |
+| GET | `/api/v1/tracker/locations/:id` | JWT | Location history (`?limit=200`) |
 | GET | `/api/v1/tracker/locations/:id/latest` | JWT | Latest GPS fix |
 
+#### Heartbeat Ping
+
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| POST | `/api/v1/tracker/ping` | `X-Api-Key` | ESP32 heartbeat (every 30 s) — keeps device marked online |
+
 #### Health
+
 ```
 GET /health  →  { "status": "ok", "timestamp": "..." }
 ```
@@ -158,11 +171,11 @@ const socket = io("http://server:4000", {
 ### Database Schema
 
 ```sql
-users        — id, email, password_hash, name, role
+users          — id, email, password_hash, name, role
 refresh_tokens — id, user_id, token, expires_at
-devices      — id, name, api_key, owner_id, is_active, is_online, last_seen
-locations    — id, device_id, lat, lng, speed, course, altitude,
-               satellites, hdop, gps_timestamp, created_at
+devices        — id, name, api_key, owner_id, is_active, is_online, last_seen
+locations      — id, device_id, lat, lng, speed, course, altitude,
+                 satellites, hdop, gps_timestamp, created_at
 ```
 
 ---
@@ -172,18 +185,11 @@ locations    — id, device_id, lat, lng, speed, course, altitude,
 ### Setup (PlatformIO)
 
 1. Install [PlatformIO IDE](https://platformio.org/) (VS Code extension)
-2. Open `esp32/` folder in VS Code
-3. Edit `src/main.cpp` — fill in your credentials:
+2. Open `esp32/` in VS Code
+3. Build & Upload via `PlatformIO: Upload` (Ctrl+Alt+U)
+4. Monitor via `PlatformIO: Monitor` at 115200 baud
 
-```cpp
-#define WIFI_SSID       "YOUR_WIFI_SSID"
-#define WIFI_PASSWORD   "YOUR_WIFI_PASSWORD"
-#define SERVER_URL      "http://YOUR_SERVER_IP:4000/api/v1/tracker/location"
-#define DEVICE_API_KEY  "..."   // from POST /api/v1/tracker/devices
-```
-
-4. Build & Upload: `PlatformIO: Upload` (Ctrl+Alt+U)
-5. Monitor: `PlatformIO: Monitor` (Ctrl+Alt+S) at 115200 baud
+**No hardcoded credentials** — Wi-Fi and pairing are configured through the built-in web portal.
 
 ### Libraries (`platformio.ini`)
 
@@ -191,39 +197,103 @@ locations    — id, device_id, lat, lng, speed, course, altitude,
 lib_deps =
     mikalhart/TinyGPSPlus @ ^1.0.3
     bblanchon/ArduinoJson @ ^7.0.0
+    ricmoo/QRCode @ ^0.0.1
 ```
 
-### Firmware Behavior
+### First-Time Setup Flow
 
-1. Boot → configures GPS to 10 Hz / 115200 baud (saved to flash)
-2. Connect to Wi-Fi (auto-reconnect on drop)
-3. Wait for satellite lock (LED blinks while acquiring)
-4. Every **1 second** (`POST_INTERVAL_MS`): POST latest GPS fix to server
-5. Server broadcasts fix to all subscribed Flutter clients via Socket.IO
-6. LED solid ON = connected + posting; LED off = post failed
+```
+Power on ESP32
+      │
+      ├─ No saved Wi-Fi ──► AP Mode: "GPS-Tracker-Setup" (192.168.4.1)
+      │                          │
+      │                     Open captive portal in browser
+      │                          │
+      │                     Scan networks → enter password → Save & Connect
+      │                          │
+      │                     ESP32 connects to Wi-Fi → switches to Tracking Mode
+      │
+      └─ Saved Wi-Fi found ──► Connect → Tracking Mode
+```
+
+### Captive Portal (`192.168.4.1`)
+
+The ESP32 hosts a full web UI when in setup mode:
+
+- **Wi-Fi scan** — lists nearby networks with signal strength bars
+- **Credentials form** — SSID + password with show/hide toggle
+- **Status card** — live connection state (connected / not connected / IP address)
+- **QR code display** — SVG rendered on-device for app pairing
+- **Download QR** — saves `.bmp` to phone via system download manager
+- **Wiring reference** — NEO-6M pinout table built into the page
+- **Reset button** — clears all NVS credentials and restarts into setup mode
+
+> Hold the **BOOT button for 3 seconds** while in tracking mode to re-enter setup mode at any time.
+
+### Pairing with TraceX App
+
+1. In the setup portal, the QR code encodes the ESP32's 64-char hex API key
+2. Open TraceX → tap **Add Device**
+3. Either **scan the QR** with the camera or **upload a QR image** from gallery
+4. App registers the key with the server and the device appears on the map
+
+### Device Deletion Behavior
+
+When a device is deleted from the app, the server stops accepting its API key. The ESP32 detects the `401` response on the **very next POST or ping** (within 1–3 seconds) and immediately:
+1. Clears all NVS credentials (Wi-Fi + API key)
+2. Restarts into setup AP mode with a freshly generated API key
+
+### LED Status Patterns
+
+| Pattern | Mode | Meaning |
+|---|---|---|
+| Off | `LED_OFF` | Idle / uninitialised |
+| Slow blink — 800 ms on/off | `LED_SLOW` | Setup AP active, needs Wi-Fi config |
+| Medium blink — 300 ms on/off | `LED_MEDIUM` | Wi-Fi connecting / reconnecting |
+| Rapid toggle — 100 ms on/off | `LED_RAPID` | Wi-Fi connected, waiting for GPS fix |
+| **3-burst** · · · + 1.1 s gap | `LED_TRIPLE` | **No Wi-Fi** (3 × 100 ms bursts + pause) |
+| **2-burst** · · + 700 ms gap | `LED_GPS_FIX` | **GPS fix acquired**, about to start posting (2 × 100 ms + pause) |
+| **2-burst** · · + 1.1 s gap | `LED_DOUBLE` | **Wi-Fi OK, server not responding** (2 × 100 ms + longer pause) |
+| **1-pulse** · + 900 ms gap | `LED_PULSE` | **GPS + server OK** — normal operation |
+
+All patterns use `millis() % period` — no phase tracking needed. A FreeRTOS 100 ms timer keeps the LED blinking even during blocking HTTP calls.
 
 ### Serial Monitor Output
 
 ```
-=== GPS Tracker Firmware ===
-[GPS] Switching baud to 115200…
-[GPS] Setting 10 Hz rate…
-[WiFi] Connecting to MyNetwork....
-[WiFi] Connected — IP: 192.168.1.50
-[GPS] First fix! Sats=7
-[POST] OK  lat=10.720234 lng=122.562187 sats=7 spd=0.0 km/h
+=== TraceX GPS Firmware ===
+[GPS] Sending factory config reset at 115200…
+[GPS] Opening at 9600 baud  RX=GPIO21 TX=GPIO22
+[GPS] ✓ Module responding at 9600 baud
+[GPS] Enabling NMEA sentences (GGA, RMC, GSA, GSV)…
+[GPS] Setting 1 Hz update rate…
+[GPS] ✓ Config saved — 9600 baud NMEA, waiting for satellite fix…
+[APP] Loaded API key: a1b2c3d4…
+[WiFi] Connecting to MyNetwork..............
+[WiFi] Connected — IP: 192.168.1.50  RSSI: -58 dBm  CH: 6
+[PING] → https://…/ping  key: a1b2c3d4…
+[PING] ✓ Online  heap: 210432 B
+[GPS] ✓ NMEA data flowing — module is connected and communicating with ESP32
+[GPS]   Waiting for satellite lock  (LED blinks 1/s when locked)
+[GPS] ✓ First fix!  lat=10.720234 lng=122.562187  sats=7  hdop=1.20
+[POST] ✓ lat=10.720234 lng=122.562187  sats=7  spd=0.0km/h  hdop=1.20  alt=12.3m
+[SYS] Uptime: 30s  Heap: 209800B  WiFi: MyNetwork (-58dBm)  GPS: LOCKED  Sats: 7
 ```
 
 ---
 
-## Flutter App
+## Flutter App (TraceX)
 
 ### Tech Stack
+
 - **Framework:** Flutter 3 / Dart 3
 - **State:** Provider (ChangeNotifier)
-- **Maps:** flutter_map (OpenStreetMap)
+- **Maps:** flutter_map 7 (OpenStreetMap / CARTO dark tiles)
 - **Real-time:** socket_io_client
-- **Storage:** flutter_secure_storage (tokens), shared_preferences
+- **Storage:** flutter_secure_storage (JWT tokens), shared_preferences
+- **Location:** geolocator (user position dot on map)
+- **QR:** mobile_scanner v7 (camera + gallery image analysis)
+- **Gallery pick:** image_picker
 
 ### Setup
 
@@ -232,7 +302,7 @@ cd flutter_app
 flutter pub get
 ```
 
-Edit `lib/constants.dart`:
+Edit [lib/constants.dart](flutter_app/lib/constants.dart):
 
 ```dart
 const String kBaseUrl   = 'http://YOUR_SERVER_IP:4000/api/v1';
@@ -240,32 +310,71 @@ const String kSocketUrl = 'http://YOUR_SERVER_IP:4000';
 ```
 
 Run:
+
 ```bash
 flutter run
 ```
 
 ### App Screens
 
-| Screen | Description |
-|---|---|
-| **Login / Register** | JWT auth with token persistence |
-| **Home (Device List)** | All devices, online/offline status, latest coords, stats |
-| **Add Device** | Register ESP32 → one-time API key display with copy |
-| **Device Detail** | Live map, pulsing marker, track polyline, info panel |
+| Screen | File | Description |
+|---|---|---|
+| **Login** | [screens/auth/login_screen.dart](flutter_app/lib/screens/auth/login_screen.dart) | JWT sign-in with version badge |
+| **Register** | [screens/auth/register_screen.dart](flutter_app/lib/screens/auth/register_screen.dart) | New account creation |
+| **Home** | [screens/home/home_screen.dart](flutter_app/lib/screens/home/home_screen.dart) | Live map + device panel |
+| **Add Device** | [screens/device/add_device_screen.dart](flutter_app/lib/screens/device/add_device_screen.dart) | QR scan or gallery upload |
+| **Device Detail** | [screens/device/device_detail_screen.dart](flutter_app/lib/screens/device/device_detail_screen.dart) | Full-screen map + location history |
+
+### Home Screen Features
+
+**Map (always visible)**
+- Dark CARTO tile layer — rendered even with no devices registered
+- Transparent pill overlay: "No devices registered" or "Waiting for GPS fix…" — does not block map pan/zoom (`IgnorePointer`)
+- Off-screen directional arrows — tap to pan to a device outside the viewport
+- User location dot (blue pulsing) — requires location permission
+
+**Device markers**
+- Pin tip anchored exactly at GPS coordinate
+- Pulsing ring animation (green = online, blue = offline)
+- Label chip with device name — scales with zoom level
+- Trailing dots (last 20 positions) fade with age
+- Tap marker → device modal
+
+**Bottom panel** (collapsible)
+- Online / offline counter — updated every 5 s via client-side staleness check (devices last seen > 35 s ago are marked offline without waiting for a WebSocket event)
+- Device rows show: name, ONLINE/OFFLINE badge, GPS coordinates, **last seen timestamp** (green when online, muted blue when offline)
+- Follow toggle — map auto-pans to a followed device on each live update
+- Add button → Add Device screen
+
+**Device modal** (bottom sheet, tap marker or row)
+- Rename device (inline text field + Save)
+- Live online status dot + last-seen timestamp
+- GPS coordinates, speed, satellites, altitude info box
+- View History → Device Detail screen
+- Delete button → confirmation dialog (warns that ESP32 will reset and re-pair)
+
+### Add Device Screen
+
+Two pairing methods:
+1. **Camera scan** — real-time QR scanner via `mobile_scanner`
+2. **Upload from Gallery** — pick a photo via `image_picker`, decoded with `MobileScannerController.analyzeImage(path)`
+
+Both extract the API key from the QR, POST to `/tracker/devices`, and show the one-time key in a dialog with a copy button.
 
 ### App Flow
 
 ```
-Login ──► Home Screen (device list)
+Login ──► Home Screen (live map + device list)
               │
-              ├── + FAB ──► Add Device ──► shows api_key (copy to firmware)
+              ├── + Add ──► Add Device ──► Scan QR (camera)
+              │                       └──► Upload QR image (gallery)
               │
-              └── tap card ──► Device Detail
-                                   │
-                                   ├── Flutter Map (OpenStreetMap)
-                                   ├── Pulsing live marker (green=online)
-                                   ├── Track polyline (last 200 points)
-                                   └── Info panel: coords / speed / sats / altitude
+              ├── tap marker or row ──► Device Modal
+              │                            ├── Rename
+              │                            ├── View History ──► Device Detail
+              │                            └── Delete (→ ESP32 resets immediately)
+              │
+              └── follow toggle ──► map auto-pans on each live location update
 ```
 
 ### Color Scheme — Ocean Blue
@@ -274,9 +383,10 @@ Login ──► Home Screen (device list)
 |---|---|
 | Primary | `#3B82F6` (blue-500) |
 | Deep navy | `#1E3A8A` (blue-900) |
-| Gradient | navy → indigo → cyan |
 | Background | `#080F1E` |
-| Card | `#0D1730` |
+| Card surface | `#0D1730` |
+| Online | `#22C55E` (green) |
+| Gradient | navy → indigo → cyan |
 
 ---
 
@@ -288,24 +398,22 @@ mysql -u root -p < server/src/database/schema.sql
 
 # 2. Start server
 cd server && npm install && cp .env.example .env
-# edit .env with your DB credentials
+# edit .env — DB credentials + JWT_SECRET
 npm run dev
 
-# 3. Register a user (curl or Postman)
+# 3. Register a user
 curl -X POST http://localhost:4000/api/v1/auth/register \
   -H "Content-Type: application/json" \
-  -d '{"email":"you@email.com","password":"yourpassword"}'
+  -d '{"email":"you@email.com","password":"yourpassword","name":"Your Name"}'
 
-# 4. Register a device → copy the api_key
-curl -X POST http://localhost:4000/api/v1/tracker/devices \
-  -H "Authorization: Bearer <access_token>" \
-  -H "Content-Type: application/json" \
-  -d '{"name":"Tracker-01"}'
+# 4. Flash ESP32
+# Upload firmware via PlatformIO
+# Connect phone to "GPS-Tracker-Setup" Wi-Fi
+# Open 192.168.4.1 in browser → enter home Wi-Fi → Save & Connect
 
-# 5. Flash ESP32 with api_key, SSID, password, server IP
+# 5. Open TraceX app → Add Device → scan the QR from the ESP32 portal
 
-# 6. Run Flutter app
-cd flutter_app && flutter run
+# 6. Device appears on map and starts streaming live GPS fixes every second
 ```
 
 ---
@@ -314,10 +422,11 @@ cd flutter_app && flutter run
 
 | Layer | Technology |
 |---|---|
-| Microcontroller | ESP32 (Espressif, Xtensa LX6 dual-core) |
+| Microcontroller | ESP32 DevKit V1 (Espressif, Xtensa LX6 dual-core) |
 | GPS Module | u-blox NEO-6M (GPS6MV2) |
 | Firmware Framework | PlatformIO + Arduino |
 | GPS Library | TinyGPS++ |
+| QR Generation | ricmoo/QRCode (on-device SVG + BMP) |
 | JSON (firmware) | ArduinoJson |
 | Backend Language | TypeScript 5 |
 | Backend Framework | Express.js 4 |
@@ -326,8 +435,21 @@ cd flutter_app && flutter run
 | Auth | JWT + bcrypt |
 | Mobile Framework | Flutter 3 |
 | Mobile State | Provider |
-| Mobile Maps | flutter_map (OpenStreetMap) |
+| Mobile Maps | flutter_map (OpenStreetMap / CARTO) |
 | Mobile Real-time | socket_io_client |
+| QR Scanning | mobile_scanner v7 |
+| Gallery Pick | image_picker |
+
+---
+
+## Version History
+
+| Version | Highlights |
+|---|---|
+| v1.0.12 | Client-side offline counter (35 s staleness), always-show map with transparent overlay, last-seen on device row |
+| v1.0.11 | Upload QR from gallery (image_picker + analyzeImage) |
+| v1.0.10 | Device modal, dynamic zoom-scaled markers, off-screen arrows, user location dot |
+| v1.0.9 | WebSocket room tracking fix, reconnect fix, pin centering, login version badge |
 
 ---
 
