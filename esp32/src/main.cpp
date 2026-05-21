@@ -53,46 +53,64 @@ bool gpsNmeaStarted        = false; // true once NMEA chars start arriving
 #define GPS_LOG_INTERVAL_MS   5000  // GPS-waiting log every 5 s (not every 1 s)
 
 // ── LED state machine ─────────────────────────────────────────────────────────
+// ── LED patterns ──────────────────────────────────────────────────────────────
+//  LED_OFF      solid off            — idle / uninitialised
+//  LED_SLOW     800 ms toggle        — setup/AP portal (needs Wi-Fi config)
+//  LED_MEDIUM   300 ms toggle        — Wi-Fi connecting / reconnecting
+//  LED_TRIPLE   ···  pause           — NO Wi-Fi (3 x 100 ms bursts + 1.1 s gap)
+//  LED_RAPID    100 ms toggle        — Wi-Fi OK, waiting for GPS satellite fix
+//  LED_GPS_FIX  ··   pause           — GPS fix acquired (2 x 100 ms + 700 ms gap)
+//  LED_PULSE    ·    pause           — GPS fixed + server ACK  (1 x 100 ms + 900 ms)
+//  LED_DOUBLE   ··   pause           — Wi-Fi OK but server not responding
+//                                       (2 x 100 ms + 1.1 s gap, slower than GPS_FIX)
 enum LedMode {
-  LED_OFF,          // solid off
-  LED_SLOW,         // 800 ms toggle  — setup / AP portal
-  LED_MEDIUM,       // 300 ms toggle  — WiFi connecting / reconnecting
-  LED_RAPID,        // 100 ms toggle  — tracking, waiting for GPS satellite fix
-  LED_PULSE,        // 100 ms ON, 900 ms OFF per second — GPS locked + sending OK
+  LED_OFF,
+  LED_SLOW,
+  LED_MEDIUM,
+  LED_TRIPLE,
+  LED_RAPID,
+  LED_GPS_FIX,
+  LED_PULSE,
+  LED_DOUBLE,
 };
-volatile LedMode       ledMode    = LED_OFF;
-volatile bool          ledState   = false;
-volatile unsigned long ledLastMs  = 0;
+volatile LedMode ledMode  = LED_OFF;
+volatile bool    ledState = false;
 
+// All patterns use millis() % period so no phase tracking is needed.
+// The FreeRTOS timer fires every 100 ms — each flash slot is exactly 100 ms.
 void updateLed() {
-  unsigned long now = millis();
+  uint32_t t;
+  bool on;
   switch (ledMode) {
-    case LED_OFF:
-      digitalWrite(LED_PIN, LOW);
+    case LED_OFF:     digitalWrite(LED_PIN, LOW); return;
+    // 800 ms on / 800 ms off
+    case LED_SLOW:    on = (millis() % 1600) < 800;  break;
+    // 300 ms on / 300 ms off
+    case LED_MEDIUM:  on = (millis() % 600)  < 300;  break;
+    // rapid 100 ms toggle
+    case LED_RAPID:   on = (millis() % 200)  < 100;  break;
+    // 1 pulse/s — GPS fix + server OK
+    case LED_PULSE:   on = (millis() % 1000) < 100;  break;
+    // 2 quick pulses/s — GPS fix acquired, not yet server-confirmed
+    case LED_GPS_FIX:
+      t  = millis() % 1000;
+      on = (t < 100) || (t >= 200 && t < 300);
       break;
-    case LED_SLOW:
-      if (now - ledLastMs >= 800) {
-        ledLastMs = now; ledState = !ledState;
-        digitalWrite(LED_PIN, ledState);
-      }
+    // 2 burst flashes + 1.1 s gap — Wi-Fi OK, server not responding
+    case LED_DOUBLE:
+      t  = millis() % 1400;
+      on = (t < 100) || (t >= 200 && t < 300);
       break;
-    case LED_MEDIUM:
-      if (now - ledLastMs >= 300) {
-        ledLastMs = now; ledState = !ledState;
-        digitalWrite(LED_PIN, ledState);
-      }
+    // 3 burst flashes + 1.1 s gap — no Wi-Fi connection
+    case LED_TRIPLE:
+      t  = millis() % 1600;
+      on = (t < 100) || (t >= 200 && t < 300) || (t >= 400 && t < 500);
       break;
-    case LED_RAPID:
-      if (now - ledLastMs >= 100) {
-        ledLastMs = now; ledState = !ledState;
-        digitalWrite(LED_PIN, ledState);
-      }
-      break;
-    case LED_PULSE:
-      // brief 100 ms flash once per second
-      if (ledState  && now - ledLastMs >= 100)  { ledLastMs = now; ledState = false; digitalWrite(LED_PIN, LOW);  }
-      if (!ledState && now - ledLastMs >= 900)  { ledLastMs = now; ledState = true;  digitalWrite(LED_PIN, HIGH); }
-      break;
+    default: return;
+  }
+  if (ledState != on) {
+    ledState = on;
+    digitalWrite(LED_PIN, on ? HIGH : LOW);
   }
 }
 
@@ -710,11 +728,7 @@ bool connectWiFi(const String &ssid, const String &pass) {
       return false;
     }
     // Keep LED updating during blocking wait
-    unsigned long now = millis();
-    if (now - ledLastMs >= 300) {
-      ledLastMs = now; ledState = !ledState;
-      digitalWrite(LED_PIN, ledState);
-    }
+    updateLed();
     delay(50);
     if ((millis() - t) % 400 < 50) Serial.print(".");
   }
@@ -725,10 +739,11 @@ bool connectWiFi(const String &ssid, const String &pass) {
 
 void ensureWiFi() {
   if (WiFi.status() != WL_CONNECTED) {
+    ledMode = LED_TRIPLE;   // 3-flash: no Wi-Fi
     Serial.println("[WiFi] Reconnecting…");
     connectWiFi(savedSSID, savedPass);
-    // Restore LED to correct tracking state after reconnect
-    ledMode = gpsReady ? LED_PULSE : LED_RAPID;
+    // After reconnect restore LED — next post/ping will refine it
+    ledMode = gpsReady ? LED_GPS_FIX : LED_RAPID;
   }
 }
 
@@ -816,6 +831,7 @@ void pingServer() {
   } else {
     String body = http.getString();
     Serial.printf("[PING] ✗ HTTP %d  body: %.80s\n", code, body.c_str());
+    ledMode = LED_DOUBLE;   // 2-flash: Wi-Fi OK, server not responding
   }
   http.end();
 }
@@ -880,7 +896,7 @@ void postLocation() {
   } else {
     String body = http.getString();
     Serial.printf("[POST] ✗ HTTP %d  body: %.80s\n", code, body.c_str());
-    ledMode = LED_RAPID;
+    ledMode = LED_DOUBLE;   // 2-flash: Wi-Fi OK, server not responding
   }
   http.end();
 }
@@ -976,6 +992,7 @@ void loop() {
 
   if (gps.location.isUpdated() && !gpsReady) {
     gpsReady = true;
+    ledMode = LED_GPS_FIX;   // 2-flash: GPS fix acquired, about to start posting
     Serial.printf("[GPS] ✓ First fix!  lat=%.6f lng=%.6f  sats=%d  hdop=%.2f\n",
       gps.location.lat(), gps.location.lng(),
       gps.satellites.isValid() ? (int)gps.satellites.value() : 0,
