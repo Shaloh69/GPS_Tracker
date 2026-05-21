@@ -518,8 +518,8 @@ class _LiveMap extends StatelessWidget {
                 d.isOnline ? AppColors.green : AppColors.blue400;
             return Marker(
               point: LatLng(loc.lat, loc.lng),
-              width: 64,
-              height: 64,
+              width: 48,
+              height: 48,
               alignment: Alignment.center,
               child: _PulseRing(color: ringColor),
             );
@@ -538,9 +538,10 @@ class _LiveMap extends StatelessWidget {
             return Marker(
               point: LatLng(loc.lat, loc.lng),
               width: 120,
-              // label ~18px + gap 4px + icon 32px = 54px — exact fit so
-              // alignment: bottomCenter places pin tip exactly on GPS coord
-              height: 54,
+              // 58px = label(~22px) + gap(4px) + icon(32px).
+              // mainAxisAlignment.end pins the column's bottom to the marker
+              // bottom, so alignment:bottomCenter lands the pin tip on the coord.
+              height: 58,
               alignment: Alignment.bottomCenter,
               child: GestureDetector(
                 onTap: () => Navigator.push(
@@ -551,7 +552,8 @@ class _LiveMap extends StatelessWidget {
                   ),
                 ),
                 child: Column(
-                  mainAxisSize: MainAxisSize.min,
+                  mainAxisSize: MainAxisSize.max,
+                  mainAxisAlignment: MainAxisAlignment.end,
                   children: [
                     // Device label chip
                     Container(
@@ -635,8 +637,8 @@ class _PulseRingState extends State<_PulseRing>
     return AnimatedBuilder(
       animation: _ctrl,
       builder: (_, __) => Container(
-        width: 64 * _scale.value,
-        height: 64 * _scale.value,
+        width: 48 * _scale.value,
+        height: 48 * _scale.value,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
           border: Border.all(

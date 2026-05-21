@@ -45,14 +45,14 @@ class SocketService extends ChangeNotifier {
 
   // Join a single device room
   void joinDevice(String deviceId) {
-    _socket?.emit('join:device', {'deviceId': deviceId});
+    _socket?.emit('join:device', deviceId);
     debugPrint('[WS] Joined device:$deviceId');
   }
 
   // Join all device rooms at once (home screen)
   void joinAll(List<String> deviceIds) {
     for (final id in deviceIds) {
-      _socket?.emit('join:device', {'deviceId': id});
+      _socket?.emit('join:device', id);
     }
     if (deviceIds.isNotEmpty) {
       debugPrint('[WS] Joined ${deviceIds.length} device rooms');
@@ -60,7 +60,7 @@ class SocketService extends ChangeNotifier {
   }
 
   void leaveDevice(String deviceId) {
-    _socket?.emit('leave:device', {'deviceId': deviceId});
+    _socket?.emit('leave:device', deviceId);
     debugPrint('[WS] Left device:$deviceId');
   }
 
